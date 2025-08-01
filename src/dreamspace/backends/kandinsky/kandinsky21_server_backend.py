@@ -33,21 +33,34 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         """Load the Kandinsky pipelines using AutoPipeline."""
         from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
         
-        print(f"🔮 Loading Kandinsky 2.1 from {self.model_id}...")
+        print(f"🔮 Loading Kandinsky 2.1 from {self.model_id} on {self.device}...")
         
         # Load text-to-image pipeline
         self.pipe = AutoPipelineForText2Image.from_pretrained(
             self.model_id,
             torch_dtype=torch.float16,
         )
-        self.pipe.enable_model_cpu_offload()
+        
+        # Move pipeline to specified device
+        self.pipe = self.pipe.to(self.device)
+        print(f"  📍 Text2Image pipeline moved to {self.device}")
+        
+        # Enable CPU offload for memory efficiency (but keep computation on specified GPU)
+        if self.device.startswith("cuda"):
+            self.pipe.enable_model_cpu_offload()
         
         # Load image-to-image pipeline  
         self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
             self.model_id,
             torch_dtype=torch.float16,
         )
-        self.img2img_pipe.enable_model_cpu_offload()
+        
+        # Move pipeline to specified device
+        self.img2img_pipe = self.img2img_pipe.to(self.device)
+        print(f"  📍 Image2Image pipeline moved to {self.device}")
+        
+        if self.device.startswith("cuda"):
+            self.img2img_pipe.enable_model_cpu_offload()
         
         # Enable memory optimizations
         try:
@@ -57,7 +70,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         except Exception:
             print("⚠️ XFormers not available, using default attention")
         
-        print("✅ Kandinsky 2.1 loaded successfully!")
+        print(f"✅ Kandinsky 2.1 loaded successfully on {self.device}!")
     
     def generate(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """Generate an image from a text prompt."""
