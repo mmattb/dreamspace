@@ -107,11 +107,14 @@ async def lifespan(app: FastAPI):
         
         # Add GPU configuration if specified
         if gpu_selection != "auto":
-            backend_kwargs["device"] = f"cuda:{gpu_selection.split(',')[0]}"  # Use first GPU for device
+            # For single GPU, set device parameter
+            first_gpu = gpu_selection.split(',')[0]
+            backend_kwargs["device"] = f"cuda:{first_gpu}"
+            
             if "," in gpu_selection:
-                # Multi-GPU configuration
-                backend_kwargs["gpu_ids"] = [int(gpu.strip()) for gpu in gpu_selection.split(",")]
-                print(f"🎮 Multi-GPU setup: GPUs {backend_kwargs['gpu_ids']}")
+                # Multi-GPU configuration - handled via CUDA_VISIBLE_DEVICES
+                gpu_list = [gpu.strip() for gpu in gpu_selection.split(",")]
+                print(f"🎮 Multi-GPU setup: GPUs {gpu_list} (using CUDA_VISIBLE_DEVICES)")
             else:
                 print(f"🎮 Single GPU setup: GPU {gpu_selection}")
         
