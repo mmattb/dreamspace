@@ -403,12 +403,15 @@ def create_app(backend_type: str = "kandinsky_local",
                 def generate_variation_parallel(var_idx, gpu_id):
                     """Generate a single img2img variation on a specific GPU backend."""
                     try:
-                        backend = multi_backends.get(gpu_id)
-                        if backend is None:
-                            print(f"  ⚠️ No backend available for GPU {gpu_id}, skipping variation {var_idx+1}")
+                        img_gen_instance = multi_backends.get(gpu_id)
+                        if img_gen_instance is None:
+                            print(f"  ⚠️ No img_gen instance available for GPU {gpu_id}, skipping variation {var_idx+1}")
                             with results_lock:
                                 results[var_idx] = None
                             return
+                        
+                        # Access the actual backend through the ImgGen wrapper
+                        backend = img_gen_instance.backend
                         
                         variation_seed = base_seed + var_idx + 1
                         
