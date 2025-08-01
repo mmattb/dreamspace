@@ -32,9 +32,13 @@ Examples:
     
     parser.add_argument(
         "--backend", 
-        default="kandinsky_local",
-        choices=["kandinsky_local", "sd_local", "remote"],
-        help="Backend type to use (default: kandinsky_local)"
+        default="kandinsky21_server",
+        choices=[
+            "kandinsky_local", "kandinsky21_server",
+            "sd_local", "sd15_server", "sd21_server", 
+            "remote"
+        ],
+        help="Backend type to use (default: kandinsky21_server)"
     )
     
     parser.add_argument(

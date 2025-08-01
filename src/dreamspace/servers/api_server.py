@@ -296,8 +296,12 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Dreamspace Co-Pilot API Server")
-    parser.add_argument("--backend", default="kandinsky_local", 
-                       choices=["kandinsky_local", "sd_local"],
+    parser.add_argument("--backend", default="kandinsky21_server", 
+                       choices=[
+                           "kandinsky_local", "kandinsky21_server",
+                           "sd_local", "sd15_server", "sd21_server",
+                           "remote"
+                       ],
                        help="Backend type to use")
     parser.add_argument("--host", default="localhost", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
