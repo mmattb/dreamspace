@@ -97,10 +97,20 @@ class LocalStableDiffusionBackend(ImgGenBackend):
         if 'generator' not in kwargs and 'seed' in kwargs:
             kwargs['generator'] = torch.Generator(self.device).manual_seed(kwargs.pop('seed'))
         
+        # Check if batch generation is requested
+        num_images = kwargs.get('num_images_per_prompt', 1)
+        print(f"🎯 SD backend: num_images_per_prompt = {num_images}")
+        
         result = self.pipe(prompt, return_dict=True, **kwargs)
         
+        # Handle single or multiple images
+        images = result.images
+        print(f"🖼️ Generated {len(images)} images")
+        
+        return_image = images[0] if num_images == 1 else images
+        
         return {
-            'image': result.images[0],
+            'image': return_image,
             'latents': getattr(result, 'latents', None),
             'embeddings': self._extract_text_embeddings(prompt)
         }

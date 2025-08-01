@@ -110,27 +110,35 @@ class LocalKandinskyBackend(ImgGenBackend):
         
         # Check if batch generation is requested
         num_images = kwargs.get('num_images_per_prompt', 1)
+        print(f"🎯 Kandinsky backend: num_images_per_prompt = {num_images}")
         
         # Generate image embeddings from text
         prior_result = self.prior_pipe(prompt, return_dict=True)
         image_embeds = prior_result.image_embeds
         negative_embeds = prior_result.negative_image_embeds
         
+        print(f"📐 Original embedding shape: {image_embeds.shape}")
+        
         # For batch generation, repeat embeddings
         if num_images > 1:
             image_embeds = image_embeds.repeat(num_images, 1)
             negative_embeds = negative_embeds.repeat(num_images, 1)
+            print(f"🔄 Repeated embedding shape: {image_embeds.shape}")
+        
+        # Filter out parameters that Kandinsky pipeline doesn't accept
+        pipe_kwargs = {k: v for k, v in kwargs.items() if k not in ['num_images_per_prompt']}
         
         # Generate image from embeddings
         result = self.pipe(
             image_embeds=image_embeds,
             negative_image_embeds=negative_embeds,
             return_dict=True,
-            **kwargs
+            **pipe_kwargs
         )
         
         # Return single image or list based on num_images_per_prompt
         images = result.images
+        print(f"🖼️ Generated {len(images)} images")
         return_image = images[0] if num_images == 1 else images
         
         return {
