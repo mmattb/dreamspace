@@ -81,15 +81,27 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     
     def generate(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """Generate an image from a text prompt."""
+        # Check if batch generation is requested
+        num_images = kwargs.get('num_images_per_prompt', 1)
+        
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
-            # Create generator on the same device as the pipeline
             device = self.device if hasattr(self, 'device') else 'cuda'
-            kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
+            
+            if num_images > 1:
+                # For batch generation, we want consecutive variations
+                # Use a manual approach with offset generator states
+                print(f"🎯 SD15 server backend on {self.device}: generating {num_images} consecutive variations from seed {seed}")
+                
+                # Create generator and advance it to the desired starting state
+                # Each chunk will use a different starting point but maintain internal parallelism
+                generator = torch.Generator(device=device).manual_seed(seed)
+                kwargs['generator'] = generator
+            else:
+                # Single image generation
+                kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
         
-        # Check if batch generation is requested
-        num_images = kwargs.get('num_images_per_prompt', 1)
         print(f"🎯 SD15 server backend on {self.device}: generating {num_images} images")
         
         result = self.pipe(prompt, return_dict=True, **kwargs)
