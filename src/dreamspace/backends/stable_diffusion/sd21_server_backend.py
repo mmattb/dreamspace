@@ -33,21 +33,33 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         """Load the diffusion pipelines using AutoPipeline."""
         from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
         
-        print(f"🔮 Loading Stable Diffusion 2.1 from {self.model_id}...")
+        print(f"🔮 Loading Stable Diffusion 2.1 from {self.model_id} on device {self.device}...")
         
         # Load text-to-image pipeline
         self.pipe = AutoPipelineForText2Image.from_pretrained(
             self.model_id,
             torch_dtype=torch.float16,
-        )
-        self.pipe.enable_model_cpu_offload()
+        ).to(self.device)
+        
+        # Only enable CPU offloading for the primary GPU (cuda:0)
+        # For multi-GPU setups, we want models to stay on their assigned GPU
+        if self.device == "cuda:0" or self.device == "cuda":
+            self.pipe.enable_model_cpu_offload()
+            print(f"  🔄 CPU offloading enabled for primary GPU: {self.device}")
+        else:
+            print(f"  🎯 CPU offloading disabled for multi-GPU device: {self.device}")
         
         # Load image-to-image pipeline
         self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
             self.model_id,
             torch_dtype=torch.float16,
-        )
-        self.img2img_pipe.enable_model_cpu_offload()
+        ).to(self.device)
+        
+        # Same CPU offloading logic for img2img pipeline
+        if self.device == "cuda:0" or self.device == "cuda":
+            self.img2img_pipe.enable_model_cpu_offload()
+        else:
+            print(f"  🎯 CPU offloading disabled for img2img on multi-GPU device: {self.device}")
         
         # Enable memory optimizations
         try:
@@ -61,19 +73,21 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
     
     def generate(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """Generate an image from a text prompt."""
-        # Set default generator for reproducibility
+        # Set default generator for reproducibility - use device-specific generator
         if 'generator' not in kwargs and 'seed' in kwargs:
-            kwargs['generator'] = torch.Generator().manual_seed(kwargs.pop('seed'))
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(kwargs.pop('seed'))
+            kwargs['generator'] = generator
         
         # Check if batch generation is requested
         num_images = kwargs.get('num_images_per_prompt', 1)
-        print(f"🎯 SD21 server backend: num_images_per_prompt = {num_images}")
+        print(f"🎯 SD21 server backend on {self.device}: generating {num_images} images")
         
         result = self.pipe(prompt, return_dict=True, **kwargs)
         
         # Handle single or multiple images
         images = result.images
-        print(f"🖼️ Generated {len(images)} images")
+        print(f"🖼️ Generated {len(images)} images on device {self.device}")
         
         return_image = images[0] if num_images == 1 else images
         
@@ -85,9 +99,11 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
     
     def img2img(self, image: Image.Image, prompt: str, strength: float = 0.5, **kwargs) -> Dict[str, Any]:
         """Transform an existing image using a text prompt."""
-        # Set default generator for reproducibility
+        # Set default generator for reproducibility - use device-specific generator
         if 'generator' not in kwargs and 'seed' in kwargs:
-            kwargs['generator'] = torch.Generator().manual_seed(kwargs.pop('seed'))
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(kwargs.pop('seed'))
+            kwargs['generator'] = generator
         
         result = self.img2img_pipe(
             prompt=prompt,

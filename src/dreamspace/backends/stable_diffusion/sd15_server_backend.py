@@ -45,9 +45,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         self.pipe = self.pipe.to(self.device)
         print(f"  📍 Text2Image pipeline moved to {self.device}")
         
-        # Enable CPU offload for memory efficiency (but keep computation on specified GPU)
-        if self.device.startswith("cuda"):
+        # Only enable CPU offload for single GPU setups
+        # For multi-GPU, keep models on their assigned GPUs
+        if self.device == "cuda" or self.device == "cuda:0":
             self.pipe.enable_model_cpu_offload()
+            print(f"  💾 CPU offload enabled for {self.device}")
+        else:
+            print(f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)")
         
         # Load image-to-image pipeline
         self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
@@ -59,8 +63,11 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         self.img2img_pipe = self.img2img_pipe.to(self.device)
         print(f"  📍 Image2Image pipeline moved to {self.device}")
         
-        if self.device.startswith("cuda"):
+        if self.device == "cuda" or self.device == "cuda:0":
             self.img2img_pipe.enable_model_cpu_offload()
+            print(f"  💾 CPU offload enabled for {self.device}")
+        else:
+            print(f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)")
         
         # Enable memory optimizations
         try:
@@ -74,19 +81,22 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     
     def generate(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """Generate an image from a text prompt."""
-        # Set default generator for reproducibility
+        # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
-            kwargs['generator'] = torch.Generator().manual_seed(kwargs.pop('seed'))
+            seed = kwargs.pop('seed')
+            # Create generator on the same device as the pipeline
+            device = self.device if hasattr(self, 'device') else 'cuda'
+            kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
         
         # Check if batch generation is requested
         num_images = kwargs.get('num_images_per_prompt', 1)
-        print(f"🎯 SD15 server backend: num_images_per_prompt = {num_images}")
+        print(f"🎯 SD15 server backend on {self.device}: generating {num_images} images")
         
         result = self.pipe(prompt, return_dict=True, **kwargs)
         
         # Handle single or multiple images
         images = result.images
-        print(f"🖼️ Generated {len(images)} images")
+        print(f"🖼️ Generated {len(images)} images on {self.device}")
         
         return_image = images[0] if num_images == 1 else images
         

@@ -398,40 +398,90 @@ def create_app(backend_type: str = "kandinsky_local",
             base_seed = request.seed
             
             if multi_gpu and len(chunks) > 1 and "multi_backends" in app_state:
-                # True multi-GPU processing with separate backend instances
+                # True parallel multi-GPU processing with separate backend instances
+                import threading
+                import time
+                
                 multi_backends = app_state["multi_backends"]
                 gpu_list = app_state["gpu_list"]
-                print(f"  🎮 Processing {len(chunks)} chunks across {len(gpu_list)} GPU backends: {gpu_list}")
+                print(f"  🎮 Processing {len(chunks)} chunks in PARALLEL across {len(gpu_list)} GPU backends: {gpu_list}")
+                
+                # Thread-safe results collection
+                results = {}
+                results_lock = threading.Lock()
+                
+                def generate_chunk_parallel(chunk_idx, chunk_size, gpu_id):
+                    """Generate a chunk in parallel on a specific GPU backend."""
+                    try:
+                        backend = multi_backends.get(gpu_id)
+                        if backend is None:
+                            print(f"  ⚠️ No backend available for GPU {gpu_id}, skipping chunk {chunk_idx+1}")
+                            with results_lock:
+                                results[chunk_idx] = []
+                            return
+                        
+                        print(f"  🚀 GPU {gpu_id}: Starting parallel chunk {chunk_idx+1}/{len(chunks)} ({chunk_size} images)...")
+                        chunk_start_time = time.time()
+                        
+                        # Use different seeds for each chunk to ensure variety
+                        batch_params = {**gen_params}
+                        batch_params['num_images_per_prompt'] = chunk_size
+                        
+                        if base_seed is not None:
+                            # Offset seed for each chunk to get variations
+                            batch_params['seed'] = base_seed + chunk_idx * 1000
+                        
+                        # Generate chunk using the specific GPU backend
+                        chunk_images = backend.gen(prompt=request.prompt, **batch_params)
+                        
+                        # Ensure we have a list
+                        if not isinstance(chunk_images, list):
+                            chunk_images = [chunk_images]
+                        
+                        # Store results thread-safely
+                        with results_lock:
+                            results[chunk_idx] = chunk_images
+                        
+                        chunk_elapsed = time.time() - chunk_start_time
+                        print(f"  ✅ GPU {gpu_id}: Parallel chunk {chunk_idx+1} complete in {chunk_elapsed:.1f}s ({len(chunk_images)} images)")
+                        
+                    except Exception as e:
+                        print(f"  ❌ GPU {gpu_id}: Parallel chunk {chunk_idx+1} failed: {e}")
+                        with results_lock:
+                            results[chunk_idx] = []
+                
+                # Create and start threads for parallel execution
+                threads = []
+                parallel_start_time = time.time()
                 
                 for i, chunk_size in enumerate(chunks):
                     gpu_id = gpu_list[i % len(gpu_list)]  # Round-robin GPU assignment
-                    backend = multi_backends.get(gpu_id)
-                    
-                    if backend is None:
-                        print(f"  ⚠️ No backend available for GPU {gpu_id}, using primary backend")
-                        backend = img_gen
-                    
-                    print(f"  🚀 GPU {gpu_id}: Generating chunk {i+1}/{len(chunks)} ({chunk_size} images)...")
-                    
-                    # Use different seeds for each chunk to ensure variety
-                    batch_params = {**gen_params}
-                    batch_params['num_images_per_prompt'] = chunk_size
-                    
-                    if base_seed is not None:
-                        # Offset seed for each chunk to get variations
-                        batch_params['seed'] = base_seed + i * 1000
-                    
-                    # Generate chunk using the specific GPU backend
-                    chunk_images = backend.gen(prompt=request.prompt, **batch_params)
-                    
-                    # Ensure we have a list
-                    if not isinstance(chunk_images, list):
-                        chunk_images = [chunk_images]
-                    
-                    all_images.extend(chunk_images) 
-                    print(f"  ✅ GPU {gpu_id}: Chunk {i+1} complete ({len(chunk_images)} images)")
+                    thread = threading.Thread(
+                        target=generate_chunk_parallel,
+                        args=(i, chunk_size, gpu_id),
+                        name=f"GPU-{gpu_id}-Chunk-{i+1}"
+                    )
+                    threads.append(thread)
+                    thread.start()
+                    print(f"  🔥 Started parallel thread for GPU {gpu_id}, chunk {i+1}")
                 
-                print(f"  🎯 Multi-GPU processing complete: {len(all_images)} total images")
+                # Wait for all parallel threads to complete
+                print(f"  ⏳ Waiting for {len(threads)} parallel GPU threads to complete...")
+                for i, thread in enumerate(threads):
+                    thread.join()
+                    print(f"  📋 Thread {i+1}/{len(threads)} completed ({thread.name})")
+                
+                parallel_elapsed = time.time() - parallel_start_time
+                
+                # Collect results in order
+                for i in range(len(chunks)):
+                    if i in results:
+                        all_images.extend(results[i])
+                    else:
+                        print(f"    ⚠️ Missing results for chunk {i+1}")
+                
+                print(f"  🎯 Parallel multi-GPU processing complete in {parallel_elapsed:.1f}s: {len(all_images)} total images")
+                print(f"  ⚡ Parallel speedup: {len(chunks)} chunks processed simultaneously instead of sequentially")
                 
             else:
                 # Single GPU or single chunk processing
