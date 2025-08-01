@@ -336,17 +336,25 @@ def create_app(backend_type: str = "kandinsky_local",
         authenticated: bool = Depends(auth_dependency)
     ):
         """Generate a batch of image variations for animation with smart chunking for multi-GPU."""
+        import traceback
+        
         try:
+            print(f"🔍 DEBUG: Starting generate_batch endpoint")
+            print(f"🔍 DEBUG: Request data: {request.dict()}")
+            
             img_gen = get_img_gen()
+            print(f"🔍 DEBUG: Got img_gen: {type(img_gen)}")
             
             # Limit batch size for server stability
             batch_size = min(request.batch_size, 32)
+            print(f"🔍 DEBUG: Batch size: {batch_size}")
             
             # Prepare generation parameters
             gen_params = {
                 k: v for k, v in request.dict().items() 
                 if v is not None and k not in ['prompt', 'batch_size']
             }
+            print(f"🔍 DEBUG: Generation parameters: {gen_params}")
             
             print(f"🎬 Generating batch of {batch_size} variations...")
             start_time = time.time()
@@ -354,10 +362,23 @@ def create_app(backend_type: str = "kandinsky_local",
             # Smart chunking for memory management and multi-GPU utilization
             # Calculate optimal chunk size based on image dimensions and available memory
             image_pixels = gen_params.get('width', 768) * gen_params.get('height', 768)
+            print(f"🔍 DEBUG: Image pixels: {image_pixels}")
+            
             gpu_selection = app_state.get("gpu_selection", "auto")
+            print(f"🔍 DEBUG: GPU selection: {gpu_selection}")
             
             # Determine if we have multi-GPU setup
             multi_gpu = gpu_selection != "auto" and "," in gpu_selection
+            print(f"🔍 DEBUG: Multi-GPU enabled: {multi_gpu}")
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"❌ CRITICAL ERROR in generate_batch endpoint initialization: {e}")
+            print(f"📋 Full traceback: {error_details}")
+            raise HTTPException(status_code=500, detail=f"Endpoint initialization failed: {str(e)}")
+        
+        try:
             gpu_count = len(gpu_selection.split(",")) if multi_gpu else 1
             
             if image_pixels >= 768 * 768:
@@ -559,7 +580,11 @@ def create_app(backend_type: str = "kandinsky_local",
             )
             
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"❌ CRITICAL ERROR in generate_batch main logic: {e}")
+            print(f"📋 Full traceback: {error_details}")
+            raise HTTPException(status_code=500, detail=f"Batch generation failed: {str(e)}")
     
     @app.post("/img2img", response_model=ImageResponse)
     async def image_to_image(
