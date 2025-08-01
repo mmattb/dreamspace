@@ -210,13 +210,12 @@ class AnimatedRemoteImgGen:
             "width": kwargs.get("width", 512),
             "height": kwargs.get("height", 512),
             "num_inference_steps": kwargs.get("num_inference_steps", 20),  # Faster for batches
-            "guidance_scale": kwargs.get("guidance_scale", 7.5)
+            "guidance_scale": kwargs.get("guidance_scale", 7.5),
+            "seed": kwargs.get("seed", 42)  # Use consistent seed for testing coherence
         }
         
-        if "seed" in kwargs and kwargs["seed"] is not None:
-            request_data["seed"] = kwargs["seed"]
-        
         print(f"🎬 Generating {batch_size} frame animation [{request_id[:8]}]: '{use_prompt[:50]}...'")
+        print(f"🎯 Using seed: {request_data['seed']} for coherent variations")
         start_time = time.time()
         
         try:
