@@ -228,16 +228,12 @@ class AnimatedRemoteImgGen:
                 return []
             
             print(f"📡 Sending request to server...")
-            request_start = time.time()
             
             response = requests.post(
                 f"{self.server_url}/generate_batch",
                 json=request_data,
                 timeout=300  # Longer timeout for batch generation
             )
-            
-            request_time = time.time() - request_start
-            print(f"📡 Server response received in {request_time:.1f}s")
             
             # Check for cancellation after request
             if self.cancel_current_request or self.current_request_id != request_id:
@@ -247,11 +243,7 @@ class AnimatedRemoteImgGen:
             if response.status_code != 200:
                 raise Exception(f"Batch generation failed: {response.status_code} - {response.text}")
             
-            print(f"📦 Parsing response data...")
-            parse_start = time.time()
             result = response.json()
-            parse_time = time.time() - parse_start
-            print(f"📦 Response parsed in {parse_time:.1f}s")
             
             # Show chunking info if available
             metadata = result.get("metadata", {})
@@ -260,8 +252,6 @@ class AnimatedRemoteImgGen:
                 print(f"  📊 Server used {metadata['chunks']} chunks: {chunk_info}")
             
             # Convert all base64 images to PIL Images
-            print(f"🖼️ Decoding {len(result['images'])} images...")
-            decode_start = time.time()
             frames = []
             for i, image_b64 in enumerate(result["images"]):
                 # Check for cancellation during decoding
@@ -274,9 +264,6 @@ class AnimatedRemoteImgGen:
                 frames.append(image)
                 if i % 8 == 0:  # Print every 8th frame to reduce spam
                     print(f"  Decoded frame {i+1}/{batch_size} [{request_id[:8]}]")
-            
-            decode_time = time.time() - decode_start
-            print(f"🖼️ Image decoding complete in {decode_time:.1f}s")
             
             # Final check before updating frames
             if self.cancel_current_request or self.current_request_id != request_id:
@@ -297,7 +284,6 @@ class AnimatedRemoteImgGen:
             
             elapsed = time.time() - start_time
             print(f"✅ Animation batch [{request_id[:8]}] completed in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per frame)")
-            print(f"   📊 Timing breakdown: Request {request_time:.1f}s | Parse {parse_time:.1f}s | Decode {decode_time:.1f}s")
             
             return frames
             
