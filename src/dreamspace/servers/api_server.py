@@ -31,6 +31,22 @@ class GenerateRequest(BaseModel):
     width: Optional[int] = Field(512, description="Image width")
     height: Optional[int] = Field(512, description="Image height")
     seed: Optional[int] = Field(None, description="Seed for reproducibility")
+    batch_size: Optional[int] = Field(1, description="Number of images to generate (1-32)")
+
+
+class GenerateBatchRequest(BaseModel):
+    prompt: str = Field(..., description="Text prompt for image generation")
+    batch_size: int = Field(..., description="Number of variations to generate (1-32)")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+    width: Optional[int] = Field(512, description="Image width")
+    height: Optional[int] = Field(512, description="Image height")
+    seed: Optional[int] = Field(None, description="Base seed for variations")
+
+
+class BatchImageResponse(BaseModel):
+    images: List[str] = Field(..., description="List of base64 encoded generated images")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata")
 
 
 class Img2ImgRequest(BaseModel):
@@ -186,11 +202,26 @@ def create_app(backend_type: str = "kandinsky_local",
             # Prepare generation parameters
             gen_params = {
                 k: v for k, v in request.dict().items() 
-                if v is not None and k != 'prompt'
+                if v is not None and k not in ['prompt', 'batch_size']
             }
             
-            # Generate image
-            image = img_gen.gen(prompt=request.prompt, **gen_params)
+            # Handle batch generation
+            batch_size = request.batch_size or 1
+            if batch_size > 1:
+                # For batch generation, return first image but could extend this
+                images = []
+                base_seed = request.seed
+                for i in range(batch_size):
+                    if base_seed is not None:
+                        gen_params['seed'] = base_seed + i
+                    image = img_gen.gen(prompt=request.prompt, **gen_params)
+                    images.append(image)
+                
+                # Return first image (could extend API to return all)
+                image = images[0]
+            else:
+                # Single image generation
+                image = img_gen.gen(prompt=request.prompt, **gen_params)
             
             # Convert to base64
             buffer = BytesIO()
@@ -201,7 +232,60 @@ def create_app(backend_type: str = "kandinsky_local",
                 image=image_b64,
                 metadata={
                     "prompt": request.prompt,
-                    "parameters": gen_params
+                    "parameters": gen_params,
+                    "batch_size": batch_size
+                }
+            )
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.post("/generate_batch", response_model=BatchImageResponse)
+    async def generate_batch(
+        request: GenerateBatchRequest,
+        authenticated: bool = Depends(auth_dependency)
+    ):
+        """Generate a batch of image variations for animation."""
+        try:
+            img_gen = get_img_gen()
+            
+            # Limit batch size for server stability
+            batch_size = min(request.batch_size, 32)
+            
+            # Prepare generation parameters
+            gen_params = {
+                k: v for k, v in request.dict().items() 
+                if v is not None and k not in ['prompt', 'batch_size']
+            }
+            
+            print(f"🎬 Generating batch of {batch_size} variations...")
+            images = []
+            image_b64_list = []
+            
+            base_seed = request.seed
+            for i in range(batch_size):
+                if base_seed is not None:
+                    gen_params['seed'] = base_seed + i
+                
+                print(f"  Generating {i+1}/{batch_size}...")
+                image = img_gen.gen(prompt=request.prompt, **gen_params)
+                images.append(image)
+                
+                # Convert to base64
+                buffer = BytesIO()
+                image.save(buffer, format='PNG')
+                image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                image_b64_list.append(image_b64)
+            
+            print(f"✅ Batch generation complete!")
+            
+            return BatchImageResponse(
+                images=image_b64_list,
+                metadata={
+                    "prompt": request.prompt,
+                    "parameters": gen_params,
+                    "batch_size": batch_size,
+                    "animation_ready": True
                 }
             )
             
