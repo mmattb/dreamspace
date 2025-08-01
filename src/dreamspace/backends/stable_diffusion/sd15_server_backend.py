@@ -109,7 +109,14 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     def img2img(self, image: Image.Image, prompt: str, strength: float = 0.5, **kwargs) -> Dict[str, Any]:
         """Transform an existing image using a text prompt."""
         # Ensure we're working with the correct CUDA context
-        torch.cuda.set_device(self.device)
+        # Handle different device formats (string like "cuda:0" or int like 0)
+        if isinstance(self.device, str) and self.device.startswith("cuda:"):
+            device_index = int(self.device.split(":")[1])
+            torch.cuda.set_device(device_index)
+        elif isinstance(self.device, int):
+            torch.cuda.set_device(self.device)
+        elif self.device == "cuda":
+            torch.cuda.set_device(0)  # Default to GPU 0
         
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:

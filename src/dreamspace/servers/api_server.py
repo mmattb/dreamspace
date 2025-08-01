@@ -411,7 +411,21 @@ def create_app(backend_type: str = "kandinsky_local",
                     try:
                         # Set CUDA device context at the start of each thread
                         import torch
-                        torch.cuda.set_device(gpu_id)
+                        
+                        # Handle different gpu_id formats (string like "cuda:0" or int like 0)
+                        if isinstance(gpu_id, str) and gpu_id.startswith("cuda:"):
+                            device_index = int(gpu_id.split(":")[1])
+                        elif isinstance(gpu_id, int):
+                            device_index = gpu_id
+                        else:
+                            # Try to extract device number from string
+                            try:
+                                device_index = int(str(gpu_id))
+                            except ValueError:
+                                print(f"  ⚠️ Invalid GPU ID format: {gpu_id}, using device 0")
+                                device_index = 0
+                        
+                        torch.cuda.set_device(device_index)
                         
                         img_gen_instance = multi_backends.get(gpu_id)
                         if img_gen_instance is None:
