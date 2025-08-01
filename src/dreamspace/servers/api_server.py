@@ -132,14 +132,18 @@ def create_app(backend_type: str = "kandinsky_local",
     # Authentication
     security = HTTPBearer() if enable_auth else None
     
-    def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-        """Verify API token."""
-        if not enable_auth:
-            return True
-        
+    def verify_token_with_auth(credentials: HTTPAuthorizationCredentials = Depends(security)):
+        """Verify API token when auth is enabled."""
         if not credentials or credentials.credentials != api_key:
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
         return True
+    
+    def verify_token_no_auth():
+        """No-op verification when auth is disabled."""
+        return True
+    
+    # Choose the right dependency based on auth setting
+    auth_dependency = verify_token_with_auth if enable_auth else verify_token_no_auth
     
     def get_img_gen():
         """Get ImgGen instance."""
@@ -159,7 +163,7 @@ def create_app(backend_type: str = "kandinsky_local",
         )
     
     @app.get("/models", response_model=List[ModelInfo])
-    async def get_models(authenticated: bool = Depends(verify_token)):
+    async def get_models(authenticated: bool = Depends(auth_dependency)):
         """Get available model information."""
         img_gen = get_img_gen()
         backend = img_gen.backend
@@ -173,7 +177,7 @@ def create_app(backend_type: str = "kandinsky_local",
     @app.post("/generate", response_model=ImageResponse)
     async def generate_image(
         request: GenerateRequest,
-        authenticated: bool = Depends(verify_token)
+        authenticated: bool = Depends(auth_dependency)
     ):
         """Generate an image from text prompt."""
         try:
@@ -207,7 +211,7 @@ def create_app(backend_type: str = "kandinsky_local",
     @app.post("/img2img", response_model=ImageResponse)
     async def image_to_image(
         request: Img2ImgRequest,
-        authenticated: bool = Depends(verify_token)
+        authenticated: bool = Depends(auth_dependency)
     ):
         """Transform an image using text prompt."""
         try:
@@ -250,7 +254,7 @@ def create_app(backend_type: str = "kandinsky_local",
     @app.post("/interpolate")
     async def interpolate_embeddings(
         request: InterpolateRequest,
-        authenticated: bool = Depends(verify_token)
+        authenticated: bool = Depends(auth_dependency)
     ):
         """Interpolate between embeddings."""
         try:
