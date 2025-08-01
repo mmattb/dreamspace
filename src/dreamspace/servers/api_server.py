@@ -313,10 +313,14 @@ def create_app(backend_type: str = "kandinsky_local",
                 # Single image generation
                 image = img_gen.gen(prompt=request.prompt, **gen_params)
             
-            # Convert to base64
+            # Convert to base64 using JPEG for smaller file size
             buffer = BytesIO()
-            image.save(buffer, format='PNG')
+            image.save(buffer, format='JPEG', quality=90, optimize=True)
             image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            # Log encoding info
+            buffer_size = len(buffer.getvalue())
+            print(f"📦 Encoded image: {buffer_size/1024:.1f}KB")
             
             return ImageResponse(
                 image=image_b64,
@@ -547,15 +551,49 @@ def create_app(backend_type: str = "kandinsky_local",
             
             print(f"✅ Generated {len(all_images)} images total using chunked batching")
             
-            # Convert all images to base64
-            image_b64_list = []
-            for i, image in enumerate(all_images):
+            # Convert all images to base64 using JPEG for much smaller file sizes
+            print("📦 Encoding images to JPEG...")
+            encoding_start = time.time()
+            
+            def encode_single_image(args):
+                i, image = args
                 buffer = BytesIO()
-                image.save(buffer, format='PNG')
+                # Use JPEG with high quality for much smaller file sizes
+                image.save(buffer, format='JPEG', quality=90, optimize=True)
+                buffer_size = len(buffer.getvalue())
                 image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                image_b64_list.append(image_b64)
-                if i % 4 == 0:  # Print every 4th image to reduce spam
-                    print(f"  Encoded image {i+1}/{len(all_images)}")
+                return i, image_b64, buffer_size
+            
+            # Use ThreadPoolExecutor for parallel encoding if we have many images
+            if len(all_images) > 8:
+                from concurrent.futures import ThreadPoolExecutor
+                import threading
+                
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    results = list(executor.map(encode_single_image, enumerate(all_images)))
+                
+                # Sort results by original index and extract data
+                results.sort(key=lambda x: x[0])
+                image_b64_list = [r[1] for r in results]
+                total_size = sum(r[2] for r in results)
+                
+                print(f"  Parallel encoded {len(all_images)} images")
+            else:
+                # Sequential encoding for smaller batches
+                image_b64_list = []
+                total_size = 0
+                
+                for i, image in enumerate(all_images):
+                    _, image_b64, buffer_size = encode_single_image((i, image))
+                    image_b64_list.append(image_b64)
+                    total_size += buffer_size
+                    
+                    if i % 4 == 0:  # Print every 4th image to reduce spam
+                        print(f"  Encoded image {i+1}/{len(all_images)} ({buffer_size/1024:.1f}KB)")
+            
+            encoding_time = time.time() - encoding_start
+            avg_size = total_size / len(all_images) if all_images else 0
+            print(f"📦 Encoding complete in {encoding_time:.1f}s - Total: {total_size/1024/1024:.1f}MB, Avg: {avg_size/1024:.1f}KB per image")
             
             elapsed = time.time() - start_time
             avg_time = elapsed / len(all_images) if all_images else 0
@@ -612,10 +650,14 @@ def create_app(backend_type: str = "kandinsky_local",
                 **gen_params
             )
             
-            # Convert to base64
+            # Convert to base64 using JPEG for smaller file size
             buffer = BytesIO()
-            result_image.save(buffer, format='PNG')
+            result_image.save(buffer, format='JPEG', quality=90, optimize=True)
             image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            # Log encoding info
+            buffer_size = len(buffer.getvalue())
+            print(f"📦 Encoded img2img result: {buffer_size/1024:.1f}KB")
             
             return ImageResponse(
                 image=image_b64,
