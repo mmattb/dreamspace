@@ -1,8 +1,13 @@
-"""Animated keyboard-controlled image space navigation.
+"""Animated keyboard-controlled image space navigation with artistic rhythm modulation.
 
 This creates smooth animated loops between navigation points, making transitions
 feel more like floating through a continuous dreamspace rather than jumping
-between discrete images.
+between discrete images. Features artistic enhancements including:
+
+- Randomized frame ordering for non-linear visual flow
+- Client-side image interpolation for smooth transitions  
+- Rhythmic modulation patterns (heartbeat, breathing, waves)
+- Natural timing variations for organic feel
 
 Controls:
 - Arrow Keys: Navigate through parameter space (generates new animation loops)
@@ -10,10 +15,13 @@ Controls:
 - A: Toggle animation on/off
 - F: Adjust animation speed
 - S: Save current frame
+- I: Toggle image interpolation
+- X: Shuffle frame order
+- 1-4: Switch rhythm patterns
 - Escape: Exit
 
-Each navigation generates a batch of 32 variations that loop continuously,
-creating flowing motion that makes transitions between states feel natural.
+Each navigation generates a batch of variations that display in randomized order
+with natural rhythm patterns, creating an organic, meditative visual experience.
 """
 
 import sys
@@ -26,20 +34,124 @@ from PIL import Image
 import json
 import time
 import threading
+import random
+import math
 from collections import deque
 
 
+class RhythmModulator:
+    """Base class for rhythm modulation patterns."""
+    
+    def next_interval(self) -> float:
+        """Return the time in seconds until the next transition."""
+        raise NotImplementedError
+
+
+class HeartbeatRhythm(RhythmModulator):
+    """Heartbeat-like rhythm: boom-boom-pause-boom-boom-pause..."""
+    
+    def __init__(self, base_bpm: float = 60, variation: float = 0.2):
+        self.base_bpm = base_bpm
+        self.variation = variation
+        self.beat_phase = 0  # 0=first beat, 1=pause between beats, 2=second beat, 3=long pause
+        self.base_interval = 60.0 / base_bpm  # seconds per beat
+        
+    def next_interval(self) -> float:
+        if self.beat_phase == 0:
+            # First beat - quick transition
+            interval = self.base_interval * 0.15
+            self.beat_phase = 1
+        elif self.beat_phase == 1:
+            # Brief pause between boom-boom
+            interval = self.base_interval * 0.15  
+            self.beat_phase = 2
+        elif self.beat_phase == 2:
+            # Second beat - quick transition
+            interval = self.base_interval * 0.15
+            self.beat_phase = 3
+        else:
+            # Long pause before next heartbeat
+            interval = self.base_interval * 1.55
+            self.beat_phase = 0
+            
+        # Add natural variation
+        variation_factor = 1.0 + random.uniform(-self.variation, self.variation)
+        return interval * variation_factor
+
+
+class BreathingRhythm(RhythmModulator):
+    """Breathing-like rhythm with slow inhale/exhale cycles."""
+    
+    def __init__(self, base_period: float = 8.0, variation: float = 0.15):
+        self.base_period = base_period
+        self.variation = variation
+        self.phase = 0.0  # 0-1 breathing cycle
+        
+    def next_interval(self) -> float:
+        # Sinusoidal breathing pattern
+        breath_intensity = math.sin(self.phase * 2 * math.pi)
+        # Map to interval (longer transitions for smoother breathing feel)
+        base_interval = 1.5 + 2.0 * abs(breath_intensity)
+        
+        # Add variation
+        variation_factor = 1.0 + random.uniform(-self.variation, self.variation)
+        interval = base_interval * variation_factor
+        
+        # Advance phase
+        self.phase = (self.phase + 0.08) % 1.0  # Slower phase progression
+        
+        return interval
+
+
+class WaveRhythm(RhythmModulator):
+    """Ocean wave-like rhythm with irregular intervals."""
+    
+    def __init__(self, base_interval: float = 2.5, chaos: float = 0.4):
+        self.base_interval = base_interval
+        self.chaos = chaos
+        self.wave_phase = 0.0
+        
+    def next_interval(self) -> float:
+        # Multiple overlapping sine waves for natural irregularity
+        wave1 = math.sin(self.wave_phase * 1.3)
+        wave2 = math.sin(self.wave_phase * 2.7) * 0.5
+        wave3 = math.sin(self.wave_phase * 0.8) * 0.3
+        
+        combined_wave = wave1 + wave2 + wave3
+        
+        # Map to interval (longer base for smoother transitions)
+        interval = self.base_interval * (1.0 + combined_wave * self.chaos)
+        
+        # Ensure positive interval with longer minimum
+        interval = max(0.8, interval)
+        
+        # Advance phase
+        self.wave_phase += 0.12
+        
+        return interval
+
+
 class AnimatedRemoteImgGen:
-    """Remote image generator with batch animation support."""
+    """Remote image generator with batch animation support and artistic modulation."""
     
     def __init__(self, server_url: str, initial_prompt: str = "a surreal dreamlike forest, ethereal lighting"):
         self.server_url = server_url.rstrip('/')
         self.prompt = initial_prompt
         self.current_frames = []
+        self.frame_order = []  # Randomized indices for frame display
         self.frame_index = 0
         self.is_generating = False
         self.current_request_id = None
         self.cancel_current_request = False
+        
+        # Artistic modulation
+        self.rhythm_modulator = HeartbeatRhythm(base_bpm=35)  # Very slow, meditative
+        self.last_transition_time = time.time()
+        self.current_frame_cache = None
+        self.next_frame_cache = None
+        self.interpolation_enabled = True
+        self.interpolation_steps = 8  # Number of blend steps
+        self.current_interpolation_step = 0
         
         # Test connection
         try:
@@ -53,6 +165,33 @@ class AnimatedRemoteImgGen:
                 raise Exception(f"Server health check failed: {response.status_code}")
         except Exception as e:
             raise Exception(f"Failed to connect to server: {e}")
+    
+    def set_rhythm_modulator(self, modulator: RhythmModulator):
+        """Change the rhythm modulation pattern."""
+        self.rhythm_modulator = modulator
+        print(f"🎵 Rhythm changed to: {modulator.__class__.__name__}")
+    
+    def _create_randomized_order(self):
+        """Create a randomized order for frame display."""
+        if not self.current_frames:
+            return
+        
+        self.frame_order = list(range(len(self.current_frames)))
+        random.shuffle(self.frame_order)
+        self.frame_index = 0
+        print(f"🎲 Randomized frame order: {len(self.frame_order)} frames")
+    
+    def _interpolate_frames(self, frame1: Image.Image, frame2: Image.Image, alpha: float) -> Image.Image:
+        """Create a smooth blend between two frames."""
+        if not frame1 or not frame2:
+            return frame1 or frame2
+        
+        # Ensure both images are the same size
+        if frame1.size != frame2.size:
+            frame2 = frame2.resize(frame1.size)
+        
+        # Use PIL's blend function for smooth interpolation
+        return Image.blend(frame1, frame2, alpha)
     
     def generate_animation_batch(self, prompt: str = None, batch_size: int = 32, request_id: str = None, **kwargs):
         """Generate a batch of variations for smooth animation."""
@@ -126,6 +265,14 @@ class AnimatedRemoteImgGen:
             # Only update if this request is still current
             self.current_frames = frames
             self.frame_index = 0
+            self._create_randomized_order()  # Create randomized display order
+            
+            # Reset transition timing
+            self.last_transition_time = time.time()
+            self.current_interpolation_step = 0
+            self.current_frame_cache = None
+            self.next_frame_cache = None
+            self._current_interval = self.rhythm_modulator.next_interval()
             
             elapsed = time.time() - start_time
             print(f"✅ Animation batch [{request_id[:8]}] completed in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per frame)")
@@ -146,15 +293,59 @@ class AnimatedRemoteImgGen:
             print(f"🛑 Cancelling current generation request")
     
     def get_current_frame(self):
-        """Get the current animation frame."""
-        if not self.current_frames:
+        """Get the current animation frame with optional interpolation."""
+        if not self.current_frames or not self.frame_order:
             return None
-        return self.current_frames[self.frame_index]
+        
+        current_time = time.time()
+        
+        # Get the interval for current transition (this should be consistent during the transition)
+        if not hasattr(self, '_current_interval'):
+            self._current_interval = self.rhythm_modulator.next_interval()
+        
+        # Check if it's time for the next transition
+        if current_time - self.last_transition_time >= self._current_interval:
+            self._advance_to_next_frame()
+            self.last_transition_time = current_time
+            # Get new interval for next transition
+            self._current_interval = self.rhythm_modulator.next_interval()
+        
+        # Get current and next frames
+        current_idx = self.frame_order[self.frame_index]
+        next_idx = self.frame_order[(self.frame_index + 1) % len(self.frame_order)]
+        
+        current_frame = self.current_frames[current_idx]
+        next_frame = self.current_frames[next_idx]
+        
+        if not self.interpolation_enabled:
+            return current_frame
+        
+        # Calculate interpolation progress within the transition interval
+        time_since_transition = current_time - self.last_transition_time
+        progress = min(time_since_transition / self._current_interval, 1.0)
+        
+        # Smooth interpolation curve (ease-in-out)
+        smooth_progress = 0.5 - 0.5 * math.cos(progress * math.pi)
+        
+        # Return interpolated frame with stronger blending for smoother transitions
+        return self._interpolate_frames(current_frame, next_frame, smooth_progress * 0.7)  # Much stronger blending
+    
+    def _advance_to_next_frame(self):
+        """Advance to the next frame in the randomized sequence."""
+        if self.frame_order:
+            self.frame_index = (self.frame_index + 1) % len(self.frame_order)
     
     def advance_frame(self):
-        """Advance to next frame in animation loop."""
-        if self.current_frames:
-            self.frame_index = (self.frame_index + 1) % len(self.current_frames)
+        """Manual frame advance (kept for compatibility but rhythm-based now)."""
+        # This is now handled automatically by get_current_frame()
+        pass
+    
+    def toggle_interpolation(self):
+        """Toggle image interpolation on/off."""
+        self.interpolation_enabled = not self.interpolation_enabled
+        status = "enabled" if self.interpolation_enabled else "disabled"
+        print(f"🎨 Interpolation {status}")
+        return self.interpolation_enabled
     
     def has_frames(self):
         """Check if animation frames are available."""
@@ -314,6 +505,12 @@ def main():
     print("  A: Toggle animation on/off")
     print("  F: Cycle animation speed")
     print("  S: Save current frame")
+    print("  I: Toggle image interpolation")
+    print("  X: Shuffle frame order")
+    print("  1: Heartbeat rhythm (slow)")
+    print("  2: Breathing rhythm")
+    print("  3: Wave rhythm")
+    print("  4: Heartbeat rhythm (fast)")
     print("  Escape: Exit")
     print(f"\\n🌟 Starting with prompt: '{current_prompt}'")
     print(f"🌐 Server: {server_url}")
@@ -407,6 +604,32 @@ def main():
                         current_frame.save(filename)
                         print(f"💾 Saved: {filename}")
                 
+                elif event.key == pygame.K_i:
+                    # Toggle interpolation
+                    img_gen.toggle_interpolation()
+                
+                elif event.key == pygame.K_1:
+                    # Switch to heartbeat rhythm
+                    img_gen.set_rhythm_modulator(HeartbeatRhythm(base_bpm=35))
+                
+                elif event.key == pygame.K_2:
+                    # Switch to breathing rhythm
+                    img_gen.set_rhythm_modulator(BreathingRhythm(base_period=12.0))
+                
+                elif event.key == pygame.K_3:
+                    # Switch to wave rhythm
+                    img_gen.set_rhythm_modulator(WaveRhythm(base_interval=2.8, chaos=0.6))
+                
+                elif event.key == pygame.K_4:
+                    # Switch to faster heartbeat
+                    img_gen.set_rhythm_modulator(HeartbeatRhythm(base_bpm=55))
+                
+                elif event.key == pygame.K_x:
+                    # Shuffle frame order
+                    if img_gen.has_frames():
+                        img_gen._create_randomized_order()
+                        print("🔀 Frame order reshuffled!")
+                
                 # Generate new animation if needed
                 if new_animation_needed:
                     # Cancel any existing generation
@@ -450,9 +673,13 @@ def main():
             show_image(current_frame, win, image_width, image_height, window_size)
         
         # Prepare UI text
+        rhythm_name = img_gen.rhythm_modulator.__class__.__name__.replace('Rhythm', '')
+        interpolation_status = "ON" if img_gen.interpolation_enabled else "OFF"
+        
         status_lines = [
             f"Effects: {', '.join(current_effects) if current_effects else 'None'}",
-            f"Animation: {'ON' if animation_enabled else 'OFF'} ({animation_speed} FPS)"
+            f"Animation: {'ON' if animation_enabled else 'OFF'} ({animation_speed} FPS)",
+            f"Rhythm: {rhythm_name} | Interpolation: {interpolation_status}"
         ]
         
         frame_info = ""
@@ -598,6 +825,12 @@ if __name__ == "__main__":
         print("  A: Toggle animation on/off")
         print("  F: Cycle animation speed")
         print("  S: Save current frame")
+        print("  I: Toggle image interpolation")
+        print("  X: Shuffle frame order")
+        print("  1: Heartbeat rhythm (slow)")
+        print("  2: Breathing rhythm")
+        print("  3: Wave rhythm")
+        print("  4: Heartbeat rhythm (fast)")
         print("  Escape: Exit")
         print(f"\\n🌟 Starting with prompt: '{current_prompt}'")
         print(f"🌐 Server: {server_url}")
@@ -692,6 +925,32 @@ if __name__ == "__main__":
                             current_frame.save(filename)
                             print(f"💾 Saved: {filename}")
                     
+                    elif event.key == pygame.K_i:
+                        # Toggle interpolation
+                        img_gen.toggle_interpolation()
+                    
+                    elif event.key == pygame.K_1:
+                        # Switch to heartbeat rhythm
+                        img_gen.set_rhythm_modulator(HeartbeatRhythm(base_bpm=35))
+                    
+                    elif event.key == pygame.K_2:
+                        # Switch to breathing rhythm
+                        img_gen.set_rhythm_modulator(BreathingRhythm(base_period=12.0))
+                    
+                    elif event.key == pygame.K_3:
+                        # Switch to wave rhythm
+                        img_gen.set_rhythm_modulator(WaveRhythm(base_interval=2.8, chaos=0.6))
+                    
+                    elif event.key == pygame.K_4:
+                        # Switch to faster heartbeat
+                        img_gen.set_rhythm_modulator(HeartbeatRhythm(base_bpm=55))
+                    
+                    elif event.key == pygame.K_x:
+                        # Shuffle frame order
+                        if img_gen.has_frames():
+                            img_gen._create_randomized_order()
+                            print("🔀 Frame order reshuffled!")
+                    
                     # Generate new animation if needed
                     if new_animation_needed:
                         # Cancel any existing generation
@@ -735,9 +994,13 @@ if __name__ == "__main__":
                 show_image(current_frame, win, image_width, image_height, window_size)
             
             # Prepare UI text
+            rhythm_name = img_gen.rhythm_modulator.__class__.__name__.replace('Rhythm', '')
+            interpolation_status = "ON" if img_gen.interpolation_enabled else "OFF"
+            
             status_lines = [
                 f"Effects: {', '.join(current_effects) if current_effects else 'None'}",
-                f"Animation: {'ON' if animation_enabled else 'OFF'} ({animation_speed} FPS)"
+                f"Animation: {'ON' if animation_enabled else 'OFF'} ({animation_speed} FPS)",
+                f"Rhythm: {rhythm_name} | Interpolation: {interpolation_status}"
             ]
             
             frame_info = ""
