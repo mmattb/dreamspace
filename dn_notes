@@ -1,0 +1,35 @@
+AI and EEG BCI co-pilot a beautiful journey through image space
+* EEG BCI based on internally-queued information only: perhaps motor imagery, visual imagery, and perhaps some passive BCI signals like ErrRP or some such.
+* Human user will experience a journey in generative image space
+* Control loop where AI and human->EEG push the point in semantic image and latent spaces
+  * Precise definition of what we are pushing should be based on both semantic shifts, compositional shifts, and perhaps subtle style and latent shifts.
+* We can assume an initial EEG calibration.
+* There is no *correct* path here - the human user will go on an unexpected journey.
+* Generative model must be fast enough for this to be interesting and interactive, but the loop shouldn't be so fast that we can't use the EEG signals reliably. Then it's just a random walk.
+
+* But then: how do we measure if it works? Some of the navigation *must* map on to human conscious intent or it will just seem like a sequence of images.
+
+* What should it *feel* like: like your heart warms and gets excited as the journey reaches various points.
+
+* The AI's role: to guide a *story*: the images should have a coherent semantic path. This should be achievable with existing technology. We format a prompt which includes both image and story excerpt. The LLM generates the next step in the story. This is a longer loop which executes asynchronously to the EEG. The two controllers work at their own pace.
+
+Architecture:
+____________
+* ChatGPT or Claude via API with hybrid text + image prompting
+* Stable Diffusion 1.5 / 2.1 - fast, decent, SDXL - medium fast, good, Stable Diffusion Turbo - faster, worse, Kandinsky 2.2 - medium fast, artsy w/semantic interpolation
+  * Kandinsky 2.1 has semantic interpolation which may prove handy.
+  
+* EEG-based BCI:
+  * All signals will be internally-queued, not external like SSVEP or P300
+  * Combine both passive and active neural features, for both conscious and subconscious navigation.
+  * Active: Motor imagery, visual imagery
+  * Passive: emotional valence (F3, F4 alpha), relaxtion/disengagement (delta burst frontal) cognitive engagement (beta, frontal), emotional arousal (HRV, pupil size, high frequency EEG).
+  
+From ChatGPT:
+Signal	Type	Suggested Use
+Frontal alpha asymmetry	Passive	Emotional tone control
+Occipital alpha / theta	Passive	Depth of imagination
+Motor imagery L/R	Active	Branching or scene choice
+Cognitive focus (beta burst)	Active	Push dream progression
+EMG jaw / cheeks	Passive	Mood detection, escalation
+Eye blinks	Passive	Scene shift trigger

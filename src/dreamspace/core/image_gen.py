@@ -1,0 +1,292 @@
+"""High-level interface for image generation with continuity and interpolation support."""
+
+import numpy as np
+from PIL import Image
+from typing import Optional, List, Dict, Any, Union
+from collections import deque
+
+from .base import ImgGenBackend
+from ..config.settings import Config
+
+
+class ImgGen:
+    """High-level interface for image generation with continuity and interpolation support.
+    
+    ImgGen provides a unified API for different image generation models (Stable Diffusion,
+    Kandinsky, remote APIs) with built-in support for visual continuity, semantic 
+    interpolation, and generation history management. It's designed for applications
+    that need smooth navigation through image space, such as the dreamspace co-pilot.
+    
+    Key Features:
+        - Backend abstraction: Works with local models or remote APIs
+        - Visual continuity: img2img generation maintains visual coherence
+        - Semantic interpolation: Smooth transitions between concepts
+        - History management: Automatic tracking of generations for continuity
+        - Parameter management: Flexible generation parameter handling
+    
+    Example:
+        >>> # Initialize with Kandinsky backend
+        >>> img_gen = ImgGen("kandinsky_local", prompt="a surreal forest")
+        >>> 
+        >>> # Generate initial image
+        >>> image1 = img_gen.gen()
+        >>> 
+        >>> # Evolve the image while maintaining visual continuity
+        >>> image2 = img_gen.gen_img2img(strength=0.3, prompt="a mystical forest")
+        >>> 
+        >>> # Set up semantic interpolation
+        >>> img_gen.set_interpolation_targets("forest", "ocean")
+        >>> interpolated = img_gen.gen_interpolated(0.5)  # Halfway between concepts
+    
+    Attributes:
+        prompt (str): Default prompt for generation
+        backend (ImgGenBackend): The underlying generation backend
+        generation_params (dict): Default parameters for all generations
+        history_size (int): Maximum number of generations to keep in history
+    """
+    
+    def __init__(self, 
+                 backend: Union[str, ImgGenBackend] = "kandinsky_local",
+                 prompt: Optional[str] = None,
+                 history_size: int = 10,
+                 config: Optional[Config] = None,
+                 **backend_kwargs):
+        """Initialize the ImgGen instance.
+        
+        Args:
+            backend: Either a backend type string ("sd_local", "kandinsky_local", "remote")
+                    or a pre-configured ImgGenBackend instance
+            prompt: Default prompt to use for generations when none is specified
+            history_size: Maximum number of recent generations to keep in memory
+            config: Configuration instance, if None will create default
+            **backend_kwargs: Additional arguments passed to backend constructor
+                            (e.g., model_id, device, api_url, api_key)
+        
+        Raises:
+            ValueError: If backend type string is not recognized
+        """
+        
+        # Initialize configuration
+        self.config = config or Config()
+        
+        # Initialize backend
+        if isinstance(backend, str):
+            self.backend = self._create_backend(backend, **backend_kwargs)
+        else:
+            self.backend = backend
+        
+        # Core state
+        self.prompt = prompt
+        self.history_size = history_size
+        
+        # History storage using deques for efficiency
+        self._recent_images = deque(maxlen=history_size)
+        self._recent_embeddings = deque(maxlen=history_size)
+        self._recent_latents = deque(maxlen=history_size)
+        self._recent_prompts = deque(maxlen=history_size)
+        
+        # Generation parameters from config
+        gen_config = self.config.generation
+        self.generation_params = {
+            'guidance_scale': gen_config.guidance_scale,
+            'num_inference_steps': gen_config.num_inference_steps,
+            'width': gen_config.width,
+            'height': gen_config.height
+        }
+        
+        # Interpolation state
+        self._interpolation_source = None
+        self._interpolation_target = None
+    
+    def _create_backend(self, backend_type: str, **kwargs) -> ImgGenBackend:
+        """Create a backend instance based on type string.
+        
+        Args:
+            backend_type: Type of backend to create
+            **kwargs: Additional arguments for backend
+            
+        Returns:
+            Configured backend instance
+            
+        Raises:
+            ValueError: If backend type is not recognized
+        """
+        if backend_type == "sd_local":
+            from ..backends.stable_diffusion.local_backend import LocalStableDiffusionBackend
+            return LocalStableDiffusionBackend(config=self.config, **kwargs)
+        elif backend_type == "kandinsky_local":
+            from ..backends.kandinsky.local_backend import LocalKandinskyBackend
+            return LocalKandinskyBackend(config=self.config, **kwargs)
+        elif backend_type == "remote":
+            from ..backends.remote.api_backend import RemoteBackend
+            return RemoteBackend(config=self.config, **kwargs)
+        else:
+            raise ValueError(f"Unknown backend type: {backend_type}")
+    
+    def register(self, image: Image.Image, embedding: Any = None, latent: Any = None, prompt: str = None):
+        """Register the latest generation result for history and interpolation.
+        
+        Args:
+            image: Generated PIL Image
+            embedding: Optional embedding tensor
+            latent: Optional latent tensor
+            prompt: Prompt used for generation
+        """
+        self._recent_images.append(image)
+        self._recent_embeddings.append(embedding)
+        self._recent_latents.append(latent)
+        self._recent_prompts.append(prompt or self.prompt)
+    
+    def gen(self, prompt: Optional[str] = None, **kwargs) -> Image.Image:
+        """Generate a new image from text prompt.
+        
+        Args:
+            prompt: Text description of image to generate
+            **kwargs: Generation parameters to override defaults
+            
+        Returns:
+            Generated PIL Image
+            
+        Raises:
+            ValueError: If no prompt is provided
+        """
+        use_prompt = prompt or self.prompt
+        if not use_prompt:
+            raise ValueError("No prompt provided")
+        
+        # Merge generation parameters
+        params = {**self.generation_params, **kwargs}
+        
+        # Generate
+        result = self.backend.generate(use_prompt, **params)
+        
+        # Register result
+        self.register(
+            result['image'], 
+            result.get('embeddings'), 
+            result.get('latents'),
+            use_prompt
+        )
+        
+        return result['image']
+    
+    def gen_img2img(self, strength: float = 0.5, prompt: Optional[str] = None, **kwargs) -> Image.Image:
+        """Generate using img2img from the most recent image.
+        
+        Args:
+            strength: How much to transform the image (0.0=no change, 1.0=complete change)
+            prompt: Text description to guide the transformation
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            Transformed PIL Image
+            
+        Raises:
+            ValueError: If no prompt is provided
+        """
+        if not self._recent_images:
+            return self.gen(prompt, **kwargs)  # Fall back to text2img
+        
+        use_prompt = prompt or self.prompt
+        if not use_prompt:
+            raise ValueError("No prompt provided")
+        
+        # Use most recent image as source
+        source_image = self._recent_images[-1]
+        
+        params = {**self.generation_params, **kwargs}
+        result = self.backend.img2img(source_image, use_prompt, strength, **params)
+        
+        # Register result
+        self.register(
+            result['image'], 
+            result.get('embeddings'), 
+            result.get('latents'),
+            use_prompt
+        )
+        
+        return result['image']
+    
+    def set_interpolation_targets(self, prompt1: str, prompt2: str):
+        """Set up interpolation between two prompts.
+        
+        Args:
+            prompt1: First prompt (source)
+            prompt2: Second prompt (target)
+        """
+        result1 = self.backend.generate(prompt1, **self.generation_params)
+        result2 = self.backend.generate(prompt2, **self.generation_params)
+        
+        self._interpolation_source = {
+            'prompt': prompt1,
+            'embedding': result1.get('embeddings'),
+            'image': result1['image']
+        }
+        self._interpolation_target = {
+            'prompt': prompt2,
+            'embedding': result2.get('embeddings'),
+            'image': result2['image']
+        }
+    
+    def gen_interpolated(self, alpha: float) -> Image.Image:
+        """Generate an image interpolated between source and target.
+        
+        Args:
+            alpha: Interpolation factor (0.0=source, 1.0=target)
+            
+        Returns:
+            Interpolated PIL Image
+            
+        Raises:
+            ValueError: If interpolation targets are not set
+        """
+        if not self._interpolation_source or not self._interpolation_target:
+            raise ValueError("Interpolation targets not set. Call set_interpolation_targets() first.")
+        
+        if not (self._interpolation_source['embedding'] is not None and 
+                self._interpolation_target['embedding'] is not None):
+            # Fall back to img2img interpolation if no embeddings
+            alpha = max(0.0, min(1.0, alpha))
+            strength = 0.3 + alpha * 0.4  # Vary strength based on alpha
+            return self.gen_img2img(strength=strength)
+        
+        # Interpolate embeddings
+        interp_embedding = self.backend.interpolate_embeddings(
+            self._interpolation_source['embedding'],
+            self._interpolation_target['embedding'],
+            alpha
+        )
+        
+        # Generate with interpolated embedding
+        # Note: This would need backend-specific implementation
+        # For now, fall back to img2img
+        return self.gen_img2img(strength=0.3 + alpha * 0.4)
+    
+    def get_recent_image(self, index: int = -1) -> Optional[Image.Image]:
+        """Get a recent image by index.
+        
+        Args:
+            index: Index of image to retrieve (-1 for most recent)
+            
+        Returns:
+            PIL Image or None if index is out of range
+        """
+        try:
+            return list(self._recent_images)[index]
+        except IndexError:
+            return None
+    
+    def update_params(self, **kwargs):
+        """Update generation parameters.
+        
+        Args:
+            **kwargs: Parameters to update
+        """
+        self.generation_params.update(kwargs)
+    
+    def clear_history(self):
+        """Clear generation history."""
+        self._recent_images.clear()
+        self._recent_embeddings.clear()
+        self._recent_latents.clear()
+        self._recent_prompts.clear()

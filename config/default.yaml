@@ -1,0 +1,36 @@
+# Default configuration for Dreamspace Co-Pilot
+
+models:
+  stable_diffusion_v1_5:
+    model_id: "runwayml/stable-diffusion-v1-5"
+    device: "cuda"
+    torch_dtype: "float16"
+    custom_params: {}
+  
+  kandinsky_2_2:
+    model_id: "kandinsky-community/kandinsky-2-2-decoder"
+    device: "cuda"
+    torch_dtype: "float16"
+    custom_params: {}
+
+generation:
+  guidance_scale: 7.5
+  num_inference_steps: 50
+  width: 512
+  height: 512
+  scheduler: null
+
+server:
+  host: "localhost"
+  port: 8000
+  workers: 1
+  max_batch_size: 4
+  timeout: 300
+  enable_cors: true
+
+# Uncomment and configure for remote API access
+# remote:
+#   api_url: "https://your-api-server.com/api"
+#   api_key: "your-api-key"
+#   timeout: 60
+#   max_retries: 3

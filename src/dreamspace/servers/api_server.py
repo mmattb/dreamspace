@@ -1,0 +1,317 @@
+"""FastAPI server for hosting image generation models."""
+
+import asyncio
+import base64
+from io import BytesIO
+from typing import Dict, Any, Optional, List
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from PIL import Image
+import uvicorn
+
+from ...core.image_gen import ImgGen
+from ...config.settings import Config
+
+
+# Request/Response models
+class GenerateRequest(BaseModel):
+    prompt: str = Field(..., description="Text prompt for image generation")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+    width: Optional[int] = Field(512, description="Image width")
+    height: Optional[int] = Field(512, description="Image height")
+    seed: Optional[int] = Field(None, description="Seed for reproducibility")
+
+
+class Img2ImgRequest(BaseModel):
+    prompt: str = Field(..., description="Text prompt for image transformation")
+    image: str = Field(..., description="Base64 encoded source image")
+    strength: float = Field(0.5, description="Transformation strength (0.0-1.0)")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+    width: Optional[int] = Field(512, description="Image width")
+    height: Optional[int] = Field(512, description="Image height")
+    seed: Optional[int] = Field(None, description="Seed for reproducibility")
+
+
+class InterpolateRequest(BaseModel):
+    embedding1: List[float] = Field(..., description="First embedding")
+    embedding2: List[float] = Field(..., description="Second embedding")
+    alpha: float = Field(..., description="Interpolation factor (0.0-1.0)")
+
+
+class ImageResponse(BaseModel):
+    image: str = Field(..., description="Base64 encoded generated image")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata")
+
+
+class HealthResponse(BaseModel):
+    status: str
+    model_loaded: bool
+    gpu_available: bool
+
+
+class ModelInfo(BaseModel):
+    name: str
+    backend_type: str
+    device: str
+    memory_usage: Optional[str] = None
+
+
+# Global state
+app_state = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager."""
+    # Startup
+    config = Config()
+    backend_type = app_state.get("backend_type", "kandinsky_local")
+    
+    try:
+        app_state["img_gen"] = ImgGen(backend=backend_type, config=config)
+        app_state["config"] = config
+        print(f"✅ Model loaded successfully: {backend_type}")
+    except Exception as e:
+        print(f"❌ Failed to load model: {e}")
+        app_state["img_gen"] = None
+    
+    yield
+    
+    # Shutdown
+    if "img_gen" in app_state and app_state["img_gen"]:
+        if hasattr(app_state["img_gen"].backend, 'cleanup'):
+            app_state["img_gen"].backend.cleanup()
+        print("🧹 Cleaned up resources")
+
+
+def create_app(backend_type: str = "kandinsky_local", 
+               enable_auth: bool = False,
+               api_key: Optional[str] = None) -> FastAPI:
+    """Create FastAPI application.
+    
+    Args:
+        backend_type: Type of backend to use
+        enable_auth: Whether to enable API key authentication
+        api_key: API key for authentication (if enabled)
+        
+    Returns:
+        Configured FastAPI application
+    """
+    app_state["backend_type"] = backend_type
+    app_state["enable_auth"] = enable_auth
+    app_state["api_key"] = api_key
+    
+    app = FastAPI(
+        title="Dreamspace Co-Pilot API",
+        description="Image generation API for the Dreamspace Co-Pilot project",
+        version="0.1.0",
+        lifespan=lifespan
+    )
+    
+    # CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Configure appropriately for production
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Authentication
+    security = HTTPBearer() if enable_auth else None
+    
+    def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+        """Verify API token."""
+        if not enable_auth:
+            return True
+        
+        if not credentials or credentials.credentials != api_key:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        return True
+    
+    def get_img_gen():
+        """Get ImgGen instance."""
+        img_gen = app_state.get("img_gen")
+        if not img_gen:
+            raise HTTPException(status_code=503, detail="Model not loaded")
+        return img_gen
+    
+    @app.get("/health", response_model=HealthResponse)
+    async def health_check():
+        """Health check endpoint."""
+        import torch
+        return HealthResponse(
+            status="healthy",
+            model_loaded=app_state.get("img_gen") is not None,
+            gpu_available=torch.cuda.is_available()
+        )
+    
+    @app.get("/models", response_model=List[ModelInfo])
+    async def get_models(authenticated: bool = Depends(verify_token)):
+        """Get available model information."""
+        img_gen = get_img_gen()
+        backend = img_gen.backend
+        
+        return [ModelInfo(
+            name=app_state.get("backend_type", "unknown"),
+            backend_type=type(backend).__name__,
+            device=getattr(backend, 'device', 'unknown')
+        )]
+    
+    @app.post("/generate", response_model=ImageResponse)
+    async def generate_image(
+        request: GenerateRequest,
+        authenticated: bool = Depends(verify_token)
+    ):
+        """Generate an image from text prompt."""
+        try:
+            img_gen = get_img_gen()
+            
+            # Prepare generation parameters
+            gen_params = {
+                k: v for k, v in request.dict().items() 
+                if v is not None and k != 'prompt'
+            }
+            
+            # Generate image
+            image = img_gen.gen(prompt=request.prompt, **gen_params)
+            
+            # Convert to base64
+            buffer = BytesIO()
+            image.save(buffer, format='PNG')
+            image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            return ImageResponse(
+                image=image_b64,
+                metadata={
+                    "prompt": request.prompt,
+                    "parameters": gen_params
+                }
+            )
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.post("/img2img", response_model=ImageResponse)
+    async def image_to_image(
+        request: Img2ImgRequest,
+        authenticated: bool = Depends(verify_token)
+    ):
+        """Transform an image using text prompt."""
+        try:
+            img_gen = get_img_gen()
+            
+            # Decode source image
+            image_data = base64.b64decode(request.image)
+            source_image = Image.open(BytesIO(image_data))
+            
+            # Prepare generation parameters
+            gen_params = {
+                k: v for k, v in request.dict().items() 
+                if v is not None and k not in ['prompt', 'image', 'strength']
+            }
+            
+            # Transform image
+            result_image = img_gen.gen_img2img(
+                strength=request.strength,
+                prompt=request.prompt,
+                **gen_params
+            )
+            
+            # Convert to base64
+            buffer = BytesIO()
+            result_image.save(buffer, format='PNG')
+            image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            return ImageResponse(
+                image=image_b64,
+                metadata={
+                    "prompt": request.prompt,
+                    "strength": request.strength,
+                    "parameters": gen_params
+                }
+            )
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.post("/interpolate")
+    async def interpolate_embeddings(
+        request: InterpolateRequest,
+        authenticated: bool = Depends(verify_token)
+    ):
+        """Interpolate between embeddings."""
+        try:
+            img_gen = get_img_gen()
+            backend = img_gen.backend
+            
+            import torch
+            embedding1 = torch.tensor(request.embedding1)
+            embedding2 = torch.tensor(request.embedding2)
+            
+            result = backend.interpolate_embeddings(embedding1, embedding2, request.alpha)
+            
+            return {"result": result.tolist() if torch.is_tensor(result) else result}
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    return app
+
+
+def run_server(backend_type: str = "kandinsky_local",
+               host: str = "localhost",
+               port: int = 8000,
+               workers: int = 1,
+               enable_auth: bool = False,
+               api_key: Optional[str] = None):
+    """Run the image generation server.
+    
+    Args:
+        backend_type: Type of backend to use
+        host: Host to bind to
+        port: Port to bind to
+        workers: Number of worker processes
+        enable_auth: Whether to enable authentication
+        api_key: API key for authentication
+    """
+    app = create_app(backend_type, enable_auth, api_key)
+    
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        workers=workers,
+        log_level="info"
+    )
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Dreamspace Co-Pilot API Server")
+    parser.add_argument("--backend", default="kandinsky_local", 
+                       choices=["kandinsky_local", "sd_local"],
+                       help="Backend type to use")
+    parser.add_argument("--host", default="localhost", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--workers", type=int, default=1, help="Number of workers")
+    parser.add_argument("--auth", action="store_true", help="Enable authentication")
+    parser.add_argument("--api-key", help="API key for authentication")
+    
+    args = parser.parse_args()
+    
+    run_server(
+        backend_type=args.backend,
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        enable_auth=args.auth,
+        api_key=args.api_key
+    )
