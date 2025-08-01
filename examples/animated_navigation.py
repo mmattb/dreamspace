@@ -38,6 +38,8 @@ class AnimatedRemoteImgGen:
         self.current_frames = []
         self.frame_index = 0
         self.is_generating = False
+        self.current_request_id = None
+        self.cancel_current_request = False
         
         # Test connection
         try:
@@ -52,9 +54,16 @@ class AnimatedRemoteImgGen:
         except Exception as e:
             raise Exception(f"Failed to connect to server: {e}")
     
-    def generate_animation_batch(self, prompt: str = None, batch_size: int = 32, **kwargs):
+    def generate_animation_batch(self, prompt: str = None, batch_size: int = 32, request_id: str = None, **kwargs):
         """Generate a batch of variations for smooth animation."""
         use_prompt = prompt or self.prompt
+        
+        # Set up request tracking
+        if request_id is None:
+            request_id = str(time.time())
+        
+        self.current_request_id = request_id
+        self.cancel_current_request = False
         
         request_data = {
             "prompt": use_prompt,
@@ -68,16 +77,27 @@ class AnimatedRemoteImgGen:
         if "seed" in kwargs and kwargs["seed"] is not None:
             request_data["seed"] = kwargs["seed"]
         
-        print(f"🎬 Generating {batch_size} frame animation: '{use_prompt[:50]}...'")
+        print(f"🎬 Generating {batch_size} frame animation [{request_id[:8]}]: '{use_prompt[:50]}...'")
         start_time = time.time()
         
         try:
             self.is_generating = True
+            
+            # Check for cancellation before making request
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled before starting")
+                return []
+            
             response = requests.post(
                 f"{self.server_url}/generate_batch",
                 json=request_data,
                 timeout=300  # Longer timeout for batch generation
             )
+            
+            # Check for cancellation after request
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled after server response")
+                return []
             
             if response.status_code != 200:
                 raise Exception(f"Batch generation failed: {response.status_code} - {response.text}")
@@ -87,24 +107,43 @@ class AnimatedRemoteImgGen:
             # Convert all base64 images to PIL Images
             frames = []
             for i, image_b64 in enumerate(result["images"]):
+                # Check for cancellation during decoding
+                if self.cancel_current_request or self.current_request_id != request_id:
+                    print(f"❌ Request {request_id[:8]} cancelled during decoding at frame {i+1}")
+                    return []
+                
                 image_data = base64.b64decode(image_b64)
                 image = Image.open(BytesIO(image_data))
                 frames.append(image)
-                print(f"  Decoded frame {i+1}/{batch_size}")
+                if i % 4 == 0:  # Print every 4th frame to reduce spam
+                    print(f"  Decoded frame {i+1}/{batch_size} [{request_id[:8]}]")
             
+            # Final check before updating frames
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled before frame update")
+                return []
+            
+            # Only update if this request is still current
             self.current_frames = frames
             self.frame_index = 0
             
             elapsed = time.time() - start_time
-            print(f"✅ Animation batch generated in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per frame)")
+            print(f"✅ Animation batch [{request_id[:8]}] completed in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per frame)")
             
             return frames
             
         except Exception as e:
-            print(f"❌ Batch generation error: {e}")
+            if not (self.cancel_current_request or self.current_request_id != request_id):
+                print(f"❌ Batch generation error [{request_id[:8]}]: {e}")
             raise
         finally:
             self.is_generating = False
+    
+    def cancel_current_generation(self):
+        """Cancel the current generation request."""
+        if self.is_generating:
+            self.cancel_current_request = True
+            print(f"🛑 Cancelling current generation request")
     
     def get_current_frame(self):
         """Get the current animation frame."""
@@ -236,7 +275,7 @@ def main():
     try:
         # Generate initial animation
         def generate_initial():
-            img_gen.generate_animation_batch(batch_size=batch_size, **generation_params)
+            img_gen.generate_animation_batch(batch_size=batch_size, request_id="initial", **generation_params)
         
         # Start generation in background
         gen_thread = threading.Thread(target=generate_initial)
@@ -299,11 +338,6 @@ def main():
                 if event.key == pygame.K_ESCAPE:
                     running = False
                     break
-                
-                # Skip input if currently generating
-                if img_gen.is_generating:
-                    print("⏳ Generation in progress, please wait...")
-                    continue
                 
                 # Prepare generation parameters
                 gen_prompt = current_prompt
@@ -375,12 +409,31 @@ def main():
                 
                 # Generate new animation if needed
                 if new_animation_needed:
+                    # Cancel any existing generation
+                    if generation_thread and generation_thread.is_alive():
+                        print("� Cancelling previous generation...")
+                        img_gen.cancel_current_generation()
+                        generation_thread.join(timeout=2)  # Wait briefly for cancellation
+                    
                     # Start generation in background thread
                     def generate_batch():
                         try:
-                            img_gen.generate_animation_batch(prompt=gen_prompt, batch_size=batch_size, **generation_params)
+                            # Generate a unique request ID
+                            request_id = f"req_{time.time():.3f}"
+                            print(f"🎬 Starting generation request {request_id}")
+                            
+                            frames = img_gen.generate_animation_batch(
+                                prompt=gen_prompt, 
+                                batch_size=batch_size, 
+                                request_id=request_id,
+                                **generation_params
+                            )
+                            
+                            if frames:  # Only log if not cancelled
+                                print(f"✅ Completed generation request {request_id}")
                         except Exception as e:
-                            print(f"❌ Background generation failed: {e}")
+                            if not img_gen.cancel_current_request:  # Don't log errors from cancelled requests
+                                print(f"❌ Background generation failed: {e}")
                     
                     generation_thread = threading.Thread(target=generate_batch)
                     generation_thread.start()
@@ -408,9 +461,9 @@ def main():
         
         generation_status = ""
         if img_gen.is_generating:
-            generation_status = "🎬 Generating new animation..."
+            generation_status = "🎬 Generating animation..."
         elif generation_thread and generation_thread.is_alive():
-            generation_status = "🎬 Generating in background..."
+            generation_status = "🎬 Background generation..."
         
         # Draw UI
         draw_ui(win, font, status_lines, frame_info, generation_status, window_size)
@@ -422,8 +475,9 @@ def main():
     # Cleanup
     print("🧹 Shutting down...")
     if generation_thread and generation_thread.is_alive():
-        print("⏳ Waiting for background generation to complete...")
-        generation_thread.join(timeout=5)
+        print("🛑 Cancelling background generation...")
+        img_gen.cancel_current_generation()
+        generation_thread.join(timeout=3)
     
     pygame.quit()
     print("👋 Goodbye!")
@@ -505,7 +559,7 @@ if __name__ == "__main__":
         try:
             # Generate initial animation
             def generate_initial():
-                img_gen.generate_animation_batch(batch_size=batch_size, **generation_params)
+                img_gen.generate_animation_batch(batch_size=batch_size, request_id="initial", **generation_params)
             
             # Start generation in background
             gen_thread = threading.Thread(target=generate_initial)
@@ -569,11 +623,6 @@ if __name__ == "__main__":
                     if event.key == pygame.K_ESCAPE:
                         running = False
                         break
-                    
-                    # Skip input if currently generating
-                    if img_gen.is_generating:
-                        print("⏳ Generation in progress, please wait...")
-                        continue
                     
                     # Prepare generation parameters
                     gen_prompt = current_prompt
@@ -645,12 +694,31 @@ if __name__ == "__main__":
                     
                     # Generate new animation if needed
                     if new_animation_needed:
+                        # Cancel any existing generation
+                        if generation_thread and generation_thread.is_alive():
+                            print("� Cancelling previous generation...")
+                            img_gen.cancel_current_generation()
+                            generation_thread.join(timeout=2)  # Wait briefly for cancellation
+                        
                         # Start generation in background thread
                         def generate_batch():
                             try:
-                                img_gen.generate_animation_batch(prompt=gen_prompt, batch_size=batch_size, **generation_params)
+                                # Generate a unique request ID
+                                request_id = f"req_{time.time():.3f}"
+                                print(f"🎬 Starting generation request {request_id}")
+                                
+                                frames = img_gen.generate_animation_batch(
+                                    prompt=gen_prompt, 
+                                    batch_size=batch_size, 
+                                    request_id=request_id,
+                                    **generation_params
+                                )
+                                
+                                if frames:  # Only log if not cancelled
+                                    print(f"✅ Completed generation request {request_id}")
                             except Exception as e:
-                                print(f"❌ Background generation failed: {e}")
+                                if not img_gen.cancel_current_request:  # Don't log errors from cancelled requests
+                                    print(f"❌ Background generation failed: {e}")
                         
                         generation_thread = threading.Thread(target=generate_batch)
                         generation_thread.start()
@@ -678,9 +746,9 @@ if __name__ == "__main__":
             
             generation_status = ""
             if img_gen.is_generating:
-                generation_status = "🎬 Generating new animation..."
+                generation_status = "🎬 Generating animation..."
             elif generation_thread and generation_thread.is_alive():
-                generation_status = "🎬 Generating in background..."
+                generation_status = "🎬 Background generation..."
             
             # Draw UI
             draw_ui(win, font, status_lines, frame_info, generation_status, window_size)
@@ -692,8 +760,9 @@ if __name__ == "__main__":
         # Cleanup
         print("🧹 Shutting down...")
         if generation_thread and generation_thread.is_alive():
-            print("⏳ Waiting for background generation to complete...")
-            generation_thread.join(timeout=5)
+            print("🛑 Cancelling background generation...")
+            img_gen.cancel_current_generation()
+            generation_thread.join(timeout=3)
         
         pygame.quit()
         print("👋 Goodbye!")
