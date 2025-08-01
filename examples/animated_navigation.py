@@ -243,6 +243,12 @@ class AnimatedRemoteImgGen:
             
             result = response.json()
             
+            # Show chunking info if available
+            metadata = result.get("metadata", {})
+            if metadata.get("chunks", 1) > 1:
+                chunk_info = metadata.get("chunk_sizes", [])
+                print(f"  📊 Server used {metadata['chunks']} chunks: {chunk_info}")
+            
             # Convert all base64 images to PIL Images
             frames = []
             for i, image_b64 in enumerate(result["images"]):
@@ -443,7 +449,8 @@ def main():
     # Animation settings
     animation_enabled = True
     animation_speed = 8  # FPS for animation
-    batch_size = 16  # Smaller batches for faster generation
+    # Use larger batch size since server now supports intelligent chunking
+    batch_size = 16  # Server will automatically chunk this if needed
     
     # Generation parameters
     generation_params = {

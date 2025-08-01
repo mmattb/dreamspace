@@ -76,6 +76,10 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     gpu_available: bool
+    gpu_count: Optional[int] = None
+    current_device: Optional[int] = None
+    selected_gpus: Optional[List[int]] = None
+    selection: Optional[str] = None
 
 
 class ModelInfo(BaseModel):
@@ -95,9 +99,23 @@ async def lifespan(app: FastAPI):
     # Startup
     config = Config()
     backend_type = app_state.get("backend_type", "kandinsky_local")
+    gpu_selection = app_state.get("gpu_selection", "auto")
     
     try:
-        app_state["img_gen"] = ImgGen(backend=backend_type, config=config)
+        # Prepare backend kwargs with GPU configuration
+        backend_kwargs = {}
+        
+        # Add GPU configuration if specified
+        if gpu_selection != "auto":
+            backend_kwargs["device"] = f"cuda:{gpu_selection.split(',')[0]}"  # Use first GPU for device
+            if "," in gpu_selection:
+                # Multi-GPU configuration
+                backend_kwargs["gpu_ids"] = [int(gpu.strip()) for gpu in gpu_selection.split(",")]
+                print(f"🎮 Multi-GPU setup: GPUs {backend_kwargs['gpu_ids']}")
+            else:
+                print(f"🎮 Single GPU setup: GPU {gpu_selection}")
+        
+        app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
         app_state["config"] = config
         print(f"✅ Model loaded successfully: {backend_type}")
     except Exception as e:
@@ -170,14 +188,52 @@ def create_app(backend_type: str = "kandinsky_local",
         return img_gen
     
     @app.get("/health", response_model=HealthResponse)
-    async def health_check():
+    async def health():
         """Health check endpoint."""
-        import torch
-        return HealthResponse(
-            status="healthy",
-            model_loaded=app_state.get("img_gen") is not None,
-            gpu_available=torch.cuda.is_available()
-        )
+        try:
+            img_gen = get_img_gen()
+            model_loaded = img_gen is not None
+            
+            # Check GPU availability
+            gpu_available = False
+            gpu_info = {}
+            try:
+                import torch
+                gpu_available = torch.cuda.is_available()
+                if gpu_available:
+                    gpu_selection = app_state.get("gpu_selection", "auto")
+                    if gpu_selection == "auto":
+                        gpu_count = torch.cuda.device_count()
+                        gpu_info = {
+                            "gpu_count": gpu_count,
+                            "current_device": torch.cuda.current_device(),
+                            "selection": "auto (all GPUs)"
+                        }
+                    else:
+                        gpu_ids = [int(x.strip()) for x in gpu_selection.split(",")]
+                        gpu_info = {
+                            "gpu_count": len(gpu_ids),
+                            "selected_gpus": gpu_ids,
+                            "selection": gpu_selection
+                        }
+            except ImportError:
+                pass
+            
+            response_data = {
+                "status": "healthy",
+                "model_loaded": model_loaded,
+                "gpu_available": gpu_available
+            }
+            response_data.update(gpu_info)
+            
+            return HealthResponse(**response_data)
+            
+        except Exception as e:
+            return HealthResponse(
+                status="unhealthy",
+                model_loaded=False,
+                gpu_available=False
+            )
     
     @app.get("/models", response_model=List[ModelInfo])
     async def get_models(authenticated: bool = Depends(auth_dependency)):
@@ -246,7 +302,7 @@ def create_app(backend_type: str = "kandinsky_local",
         request: GenerateBatchRequest,
         authenticated: bool = Depends(auth_dependency)
     ):
-        """Generate a batch of image variations for animation."""
+        """Generate a batch of image variations for animation with smart chunking for multi-GPU."""
         try:
             img_gen = get_img_gen()
             
@@ -259,39 +315,91 @@ def create_app(backend_type: str = "kandinsky_local",
                 if v is not None and k not in ['prompt', 'batch_size']
             }
             
-            print(f"🎬 Generating batch of {batch_size} variations in parallel...")
+            print(f"🎬 Generating batch of {batch_size} variations...")
             start_time = time.time()
             
-            # Use true batch generation for speed
-            # Set num_images_per_prompt to generate multiple images at once
-            batch_params = {**gen_params}
-            batch_params['num_images_per_prompt'] = batch_size
+            # Smart chunking for memory management and multi-GPU utilization
+            # Calculate optimal chunk size based on image dimensions and available memory
+            image_pixels = gen_params.get('width', 768) * gen_params.get('height', 768)
+            gpu_selection = app_state.get("gpu_selection", "auto")
             
-            # Use a base seed for consistency
-            if request.seed is not None:
-                batch_params['seed'] = request.seed
+            # Determine if we have multi-GPU setup
+            multi_gpu = gpu_selection != "auto" and "," in gpu_selection
+            gpu_count = len(gpu_selection.split(",")) if multi_gpu else 1
             
-            print(f"  🚀 Generating {batch_size} images concurrently...")
-            # Generate all images in one batch call
-            images = img_gen.gen(prompt=request.prompt, **batch_params)
+            if image_pixels >= 768 * 768:
+                # High-res images: smaller chunks to avoid OOM
+                base_chunk_size = 4
+            elif image_pixels >= 512 * 512:
+                # Medium-res images: moderate chunks
+                base_chunk_size = 6
+            else:
+                # Low-res images: larger chunks
+                base_chunk_size = 8
             
-            # Ensure we have a list of images
-            if not isinstance(images, list):
-                images = [images]
+            # Adjust chunk size for multi-GPU (can handle larger chunks)
+            max_chunk_size = base_chunk_size * gpu_count if multi_gpu else base_chunk_size
             
-            print(f"✅ Generated {len(images)} images in batch")
+            # Split batch into chunks
+            if batch_size <= max_chunk_size:
+                # Small batch - generate all at once
+                chunks = [batch_size]
+                if multi_gpu:
+                    print(f"  🚀 Generating {batch_size} images in single batch across {gpu_count} GPUs...")
+                else:
+                    print(f"  🚀 Generating {batch_size} images in single batch...")
+            else:
+                # Large batch - split into chunks
+                chunks = []
+                remaining = batch_size
+                while remaining > 0:
+                    chunk_size = min(max_chunk_size, remaining)
+                    chunks.append(chunk_size)
+                    remaining -= chunk_size
+                
+                gpu_info = f" across {gpu_count} GPUs" if multi_gpu else ""
+                print(f"  🧩 Splitting into {len(chunks)} chunks{gpu_info}: {chunks}")
+            
+            # Generate images in chunks
+            all_images = []
+            base_seed = request.seed
+            
+            for i, chunk_size in enumerate(chunks):
+                print(f"  🚀 Generating chunk {i+1}/{len(chunks)}: {chunk_size} images...")
+                
+                # Use different seeds for each chunk to ensure variety
+                batch_params = {**gen_params}
+                batch_params['num_images_per_prompt'] = chunk_size
+                
+                if base_seed is not None:
+                    # Offset seed for each chunk to get variations
+                    batch_params['seed'] = base_seed + i * 1000
+                
+                # Generate chunk
+                chunk_images = img_gen.gen(prompt=request.prompt, **batch_params)
+                
+                # Ensure we have a list
+                if not isinstance(chunk_images, list):
+                    chunk_images = [chunk_images]
+                
+                all_images.extend(chunk_images)
+                print(f"  ✅ Chunk {i+1} complete: {len(chunk_images)} images")
+            
+            print(f"✅ Generated {len(all_images)} images total using chunked batching")
             
             # Convert all images to base64
             image_b64_list = []
-            for i, image in enumerate(images):
+            for i, image in enumerate(all_images):
                 buffer = BytesIO()
                 image.save(buffer, format='PNG')
                 image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
                 image_b64_list.append(image_b64)
-                print(f"  Encoded image {i+1}/{len(images)}")
+                if i % 4 == 0:  # Print every 4th image to reduce spam
+                    print(f"  Encoded image {i+1}/{len(all_images)}")
             
             elapsed = time.time() - start_time
-            print(f"✅ Variation batch complete in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per image)")
+            avg_time = elapsed / len(all_images) if all_images else 0
+            print(f"✅ Chunked batch complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
             
             return BatchImageResponse(
                 images=image_b64_list,
@@ -301,7 +409,9 @@ def create_app(backend_type: str = "kandinsky_local",
                     "batch_size": len(image_b64_list),
                     "animation_ready": True,
                     "generation_time": elapsed,
-                    "generation_method": "concurrent_batch",
+                    "generation_method": "chunked_batch",
+                    "chunks": len(chunks),
+                    "chunk_sizes": chunks,
                     "seed": request.seed
                 }
             )
@@ -381,7 +491,8 @@ def run_server(backend_type: str = "kandinsky_local",
                port: int = 8000,
                workers: int = 1,
                enable_auth: bool = False,
-               api_key: Optional[str] = None):
+               api_key: Optional[str] = None,
+               gpus: Optional[str] = None):
     """Run the image generation server.
     
     Args:
@@ -391,7 +502,11 @@ def run_server(backend_type: str = "kandinsky_local",
         workers: Number of worker processes
         enable_auth: Whether to enable authentication
         api_key: API key for authentication
+        gpus: GPU selection - 'auto', '0', '1', '0,1', or specific GPU IDs
     """
+    # Store GPU selection for backend creation
+    app_state["gpu_selection"] = gpus
+    
     app = create_app(backend_type, enable_auth, api_key)
     
     uvicorn.run(
@@ -405,6 +520,7 @@ def run_server(backend_type: str = "kandinsky_local",
 
 if __name__ == "__main__":
     import argparse
+    import os
     
     parser = argparse.ArgumentParser(description="Dreamspace Co-Pilot API Server")
     parser.add_argument("--backend", default="kandinsky21_server", 
@@ -420,7 +536,25 @@ if __name__ == "__main__":
     parser.add_argument("--auth", action="store_true", help="Enable authentication")
     parser.add_argument("--api-key", help="API key for authentication")
     
+    # GPU selection arguments
+    parser.add_argument("--gpus", type=str, default="auto",
+                       help="GPU selection: 'auto' (use all), '0' (first GPU), '1' (second GPU), '0,1' (both GPUs), or specific GPU IDs")
+    parser.add_argument("--gpu-memory-fraction", type=float, default=0.9,
+                       help="Fraction of GPU memory to use (0.1-1.0)")
+    
     args = parser.parse_args()
+    
+    # Set GPU environment based on selection
+    if args.gpus != "auto":
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+        print(f"🎯 GPU Selection: Using GPU(s) {args.gpus}")
+    else:
+        print("🎯 GPU Selection: Auto (using all available GPUs)")
+    
+    print(f"🚀 Starting server with backend: {args.backend}")
+    print(f"🌐 Binding to: {args.host}:{args.port}")
+    if args.gpus != "auto":
+        print(f"🎮 GPU Configuration: {args.gpus} (memory fraction: {args.gpu_memory_fraction})")
     
     run_server(
         backend_type=args.backend,
@@ -428,5 +562,6 @@ if __name__ == "__main__":
         port=args.port,
         workers=args.workers,
         enable_auth=args.auth,
-        api_key=args.api_key
+        api_key=args.api_key,
+        gpus=args.gpus
     )

@@ -27,6 +27,12 @@ Examples:
   
   # Start production server
   %(prog)s --backend kandinsky_local --host 0.0.0.0 --port 8000 --workers 2
+  
+  # GPU selection examples
+  %(prog)s --backend kandinsky21_server --gpus 0 --port 8001
+  %(prog)s --backend kandinsky21_server --gpus 1 --port 8001
+  %(prog)s --backend kandinsky21_server --gpus 0,1 --port 8001
+  %(prog)s --backend kandinsky21_server --gpus auto --port 8001
         """
     )
     
@@ -83,6 +89,21 @@ Examples:
         help="Device to run models on (overrides config)"
     )
     
+    # GPU selection arguments
+    parser.add_argument(
+        "--gpus", 
+        type=str, 
+        default="auto",
+        help="GPU selection: 'auto' (use all), '0' (first GPU), '1' (second GPU), '0,1' (both GPUs), or specific GPU IDs (default: auto)"
+    )
+    
+    parser.add_argument(
+        "--gpu-memory-fraction", 
+        type=float, 
+        default=0.9,
+        help="Fraction of GPU memory to use (0.1-1.0, default: 0.9)"
+    )
+    
     parser.add_argument(
         "--log-level",
         default="info",
@@ -115,6 +136,13 @@ Examples:
             model_config.device = args.device
         print(f"🔧 Device override: {args.device}")
     
+    # Set GPU environment based on selection
+    if args.gpus != "auto":
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+        print(f"🎯 GPU Selection: Using GPU(s) {args.gpus}")
+    else:
+        print("🎯 GPU Selection: Auto (using all available GPUs)")
+    
     print(f"🚀 Starting Dreamspace Co-Pilot Server")
     print(f"   Backend: {args.backend}")
     print(f"   Host: {args.host}")
@@ -122,6 +150,8 @@ Examples:
     print(f"   Workers: {args.workers}")
     print(f"   Authentication: {'enabled' if args.auth else 'disabled'}")
     print(f"   Device: {args.device or 'from config'}")
+    if args.gpus != "auto":
+        print(f"   GPU Configuration: {args.gpus} (memory fraction: {args.gpu_memory_fraction})")
     
     try:
         run_server(
@@ -130,7 +160,8 @@ Examples:
             port=args.port,
             workers=args.workers,
             enable_auth=args.auth,
-            api_key=args.api_key
+            api_key=args.api_key,
+            gpus=args.gpus
         )
     except KeyboardInterrupt:
         print("\n🛑 Server stopped by user")
