@@ -458,21 +458,18 @@ def create_app(backend_type: str = "kandinsky_local",
                             print(f"  🚀 GPU {gpu_id}: Starting parallel chunk {chunk_idx+1}/{len(chunks)} ({chunk_size} images)...")
                             chunk_start_time = time.time()
                             
-                            # Calculate starting seed for this chunk to maintain coherent variations
+                            # Use the same seed for all images in this chunk for coherent variations
                             batch_params = {**gen_params}
                             batch_params['num_images_per_prompt'] = chunk_size
                             
                             if base_seed is not None:
-                                # Calculate the starting image index for this chunk
-                                images_before_chunk = sum(chunks[:chunk_idx])
-                                # Use the starting seed for this chunk
-                                chunk_seed = base_seed + images_before_chunk
-                                batch_params['seed'] = chunk_seed
-                                print(f"  🎲 GPU {gpu_id}: Using chunk seed {chunk_seed} for {chunk_size} consecutive variations (base: {base_seed} + offset: {images_before_chunk})")
+                                # Use the base seed for this chunk - all images will be subtle variations
+                                batch_params['seed'] = base_seed
+                                print(f"  🎲 GPU {gpu_id}: Using seed {base_seed} to generate {chunk_size} subtle variations")
                             
                             print(f"  🔧 GPU {gpu_id}: Calling backend.gen() with num_images_per_prompt={chunk_size}")
                             
-                            # Generate chunk using num_images_per_prompt for parallelism
+                            # Generate chunk using num_images_per_prompt for coherent variations
                             chunk_images = backend.gen(prompt=request.prompt, **batch_params)
                             
                             print(f"  📦 GPU {gpu_id}: Backend returned {type(chunk_images)} with length/content: {len(chunk_images) if isinstance(chunk_images, list) else 'single item'}")
@@ -543,19 +540,16 @@ def create_app(backend_type: str = "kandinsky_local",
                 for i, chunk_size in enumerate(chunks):
                     print(f"  🚀 Generating chunk {i+1}/{len(chunks)}: {chunk_size} images...")
                     
-                    # Calculate starting seed for this chunk to maintain coherent variations
+                    # Use the same seed for all images in this chunk for coherent variations
                     batch_params = {**gen_params}
                     batch_params['num_images_per_prompt'] = chunk_size
                     
                     if base_seed is not None:
-                        # Calculate the starting image index for this chunk
-                        images_before_chunk = sum(chunks[:i])
-                        # Use the starting seed for this chunk
-                        chunk_seed = base_seed + images_before_chunk
-                        batch_params['seed'] = chunk_seed
-                        print(f"  🎲 Chunk {i+1}: Using chunk seed {chunk_seed} for {chunk_size} consecutive variations (base: {base_seed} + offset: {images_before_chunk})")
+                        # Use the base seed for this chunk - all images will be subtle variations
+                        batch_params['seed'] = base_seed
+                        print(f"  🎲 Chunk {i+1}: Using seed {base_seed} to generate {chunk_size} subtle variations")
                     
-                    # Generate chunk using num_images_per_prompt for parallelism
+                    # Generate chunk using num_images_per_prompt for coherent variations
                     chunk_images = img_gen.gen(prompt=request.prompt, **batch_params)
                     
                     # Ensure we have a list
@@ -563,7 +557,7 @@ def create_app(backend_type: str = "kandinsky_local",
                         chunk_images = [chunk_images]
                     
                     all_images.extend(chunk_images)
-                    print(f"  ✅ Chunk {i+1} complete: {len(chunk_images)} images with consecutive seeds")
+                    print(f"  ✅ Chunk {i+1} complete: {len(chunk_images)} subtle variations")
             
             print(f"✅ Generated {len(all_images)} images total using chunked batching")
             
@@ -619,7 +613,7 @@ def create_app(backend_type: str = "kandinsky_local",
             # Create list of seeds that were used for debugging
             seeds_used = []
             for i in range(len(all_images)):
-                seeds_used.append(base_seed + i)
+                seeds_used.append(base_seed)  # All images use the same base seed for subtle variations
             
             return BatchImageResponse(
                 images=image_b64_list,
@@ -636,7 +630,8 @@ def create_app(backend_type: str = "kandinsky_local",
                     "multi_gpu": multi_gpu,
                     "seed": request.seed,
                     "base_seed": base_seed,
-                    "seeds_used": seeds_used
+                    "seeds_used": seeds_used,
+                    "variation_type": "same_seed_subtle_variations"
                 }
             )
             
