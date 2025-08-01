@@ -108,9 +108,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     
     def img2img(self, image: Image.Image, prompt: str, strength: float = 0.5, **kwargs) -> Dict[str, Any]:
         """Transform an existing image using a text prompt."""
-        # Set default generator for reproducibility
+        # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
-            kwargs['generator'] = torch.Generator().manual_seed(kwargs.pop('seed'))
+            seed = kwargs.pop('seed')
+            # Create generator on the same device as the pipeline
+            device = self.device if hasattr(self, 'device') else 'cuda'
+            kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
         
         result = self.img2img_pipe(
             prompt=prompt,

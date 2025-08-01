@@ -361,205 +361,149 @@ def create_app(backend_type: str = "kandinsky_local",
             }
             print(f"🔍 DEBUG: Generation parameters: {gen_params}")
             
-            print(f"🎬 Generating batch of {batch_size} variations...")
+            print(f"🎬 Generating batch of {batch_size} subtle variations...")
             start_time = time.time()
             
-            # Smart chunking for memory management and multi-GPU utilization
-            # Calculate optimal chunk size based on image dimensions and available memory
-            image_pixels = gen_params.get('width', 768) * gen_params.get('height', 768)
-            print(f"🔍 DEBUG: Image pixels: {image_pixels}")
-            
+            # Check for multi-GPU setup
             gpu_selection = app_state.get("gpu_selection", "auto")
-            print(f"🔍 DEBUG: GPU selection: {gpu_selection}")
-            
-            # Determine if we have multi-GPU setup
             multi_gpu = gpu_selection != "auto" and "," in gpu_selection
-            print(f"🔍 DEBUG: Multi-GPU enabled: {multi_gpu}")
+            has_multi_backends = "multi_backends" in app_state
             
-        except Exception as e:
-            error_details = traceback.format_exc()
-            print(f"❌ CRITICAL ERROR in generate_batch endpoint initialization: {e}")
-            print(f"📋 Full traceback: {error_details}")
-            raise HTTPException(status_code=500, detail=f"Endpoint initialization failed: {str(e)}")
-        
-        try:
-            gpu_count = len(gpu_selection.split(",")) if multi_gpu else 1
-            
-            if image_pixels >= 768 * 768:
-                # High-res images: smaller chunks to avoid OOM
-                base_chunk_size = 4
-            elif image_pixels >= 512 * 512:
-                # Medium-res images: moderate chunks
-                base_chunk_size = 6
-            else:
-                # Low-res images: larger chunks
-                base_chunk_size = 8
-            
-            # Adjust chunk size for multi-GPU (can handle larger chunks)
-            max_chunk_size = base_chunk_size * gpu_count if multi_gpu else base_chunk_size
-            
-            # Split batch into chunks
-            if batch_size <= max_chunk_size:
-                # Small batch - generate all at once
-                chunks = [batch_size]
-                if multi_gpu:
-                    print(f"  🚀 Generating {batch_size} images in single batch across {gpu_count} GPUs...")
-                else:
-                    print(f"  🚀 Generating {batch_size} images in single batch...")
-            else:
-                # Large batch - split into chunks
-                chunks = []
-                remaining = batch_size
-                while remaining > 0:
-                    chunk_size = min(max_chunk_size, remaining)
-                    chunks.append(chunk_size)
-                    remaining -= chunk_size
-                
-                gpu_info = f" across {gpu_count} GPUs" if multi_gpu else ""
-                print(f"  🧩 Splitting into {len(chunks)} chunks{gpu_info}: {chunks}")
-            
-            # Generate images in chunks with multi-GPU distribution
+            # Generate variations using img2img with low strength for consistency
             all_images = []
-            base_seed = request.seed
+            base_seed = request.seed or 42
             
-            # If no seed provided, generate one for the entire batch to ensure coherent variations
-            if base_seed is None:
-                import random
-                base_seed = random.randint(0, 2**32 - 1)
-                print(f"  🎲 Generated base seed for batch coherence: {base_seed}")
-            else:
-                print(f"  🎲 Using provided base seed: {base_seed}")
+            print(f"  🎲 Using base seed: {base_seed}")
             
-            if multi_gpu and len(chunks) > 1 and "multi_backends" in app_state:
-                # True parallel multi-GPU processing with separate backend instances
+            # First, generate a base image (always on primary GPU)
+            base_params = {**gen_params, 'seed': base_seed}
+            # Remove batch parameter for single generation
+            base_params.pop('num_images_per_prompt', None)
+            
+            print(f"  🖼️ Generating base image with seed {base_seed}...")
+            base_image = img_gen.gen(prompt=request.prompt, **base_params)
+            all_images.append(base_image)
+            
+            if batch_size == 1:
+                print(f"✅ Single image generated")
+            elif multi_gpu and has_multi_backends and batch_size > 4:
+                # Multi-GPU parallel img2img variations for larger batches
                 import threading
-                import time
-                import traceback
                 
-                try:
-                    multi_backends = app_state["multi_backends"]
-                    gpu_list = app_state["gpu_list"]
-                    print(f"  🎮 Processing {len(chunks)} chunks in PARALLEL across {len(gpu_list)} GPU backends: {gpu_list}")
-                    
-                    # Thread-safe results collection
-                    results = {}
-                    results_lock = threading.Lock()
-                    
-                    def generate_chunk_parallel(chunk_idx, chunk_size, gpu_id):
-                        """Generate a chunk in parallel on a specific GPU backend."""
-                        try:
-                            backend = multi_backends.get(gpu_id)
-                            if backend is None:
-                                print(f"  ⚠️ No backend available for GPU {gpu_id}, skipping chunk {chunk_idx+1}")
-                                with results_lock:
-                                    results[chunk_idx] = []
-                                return
-                            
-                            print(f"  🚀 GPU {gpu_id}: Starting parallel chunk {chunk_idx+1}/{len(chunks)} ({chunk_size} images)...")
-                            chunk_start_time = time.time()
-                            
-                            # Use the same seed for all images in this chunk for coherent variations
-                            batch_params = {**gen_params}
-                            batch_params['num_images_per_prompt'] = chunk_size
-                            
-                            if base_seed is not None:
-                                # Use the base seed for this chunk - all images will be subtle variations
-                                batch_params['seed'] = base_seed
-                                print(f"  🎲 GPU {gpu_id}: Using seed {base_seed} to generate {chunk_size} subtle variations")
-                            
-                            print(f"  🔧 GPU {gpu_id}: Calling backend.gen() with num_images_per_prompt={chunk_size}")
-                            
-                            # Generate chunk using num_images_per_prompt for coherent variations
-                            chunk_images = backend.gen(prompt=request.prompt, **batch_params)
-                            
-                            print(f"  📦 GPU {gpu_id}: Backend returned {type(chunk_images)} with length/content: {len(chunk_images) if isinstance(chunk_images, list) else 'single item'}")
-                            
-                            # Ensure we have a list
-                            if not isinstance(chunk_images, list):
-                                chunk_images = [chunk_images]
-                            
-                            # Store results thread-safely
+                multi_backends = app_state["multi_backends"]
+                gpu_list = app_state["gpu_list"]
+                variations_needed = batch_size - 1  # Exclude base image
+                
+                print(f"  🎮 Distributing {variations_needed} img2img variations across {len(gpu_list)} GPUs: {gpu_list}")
+                
+                # Thread-safe results collection
+                results = {}
+                results_lock = threading.Lock()
+                
+                def generate_variation_parallel(var_idx, gpu_id):
+                    """Generate a single img2img variation on a specific GPU backend."""
+                    try:
+                        backend = multi_backends.get(gpu_id)
+                        if backend is None:
+                            print(f"  ⚠️ No backend available for GPU {gpu_id}, skipping variation {var_idx+1}")
                             with results_lock:
-                                results[chunk_idx] = chunk_images
-                            
-                            chunk_elapsed = time.time() - chunk_start_time
-                            print(f"  ✅ GPU {gpu_id}: Parallel chunk {chunk_idx+1} complete in {chunk_elapsed:.1f}s ({len(chunk_images)} images)")
-                            
-                        except Exception as e:
-                            import traceback
-                            error_details = traceback.format_exc()
-                            print(f"  ❌ GPU {gpu_id}: Parallel chunk {chunk_idx+1} failed with exception: {e}")
-                            print(f"  📋 GPU {gpu_id}: Full traceback: {error_details}")
-                            with results_lock:
-                                results[chunk_idx] = []
-                    
-                    # Create and start threads for parallel execution
-                    threads = []
-                    parallel_start_time = time.time()
-                    
-                    for i, chunk_size in enumerate(chunks):
-                        gpu_id = gpu_list[i % len(gpu_list)]  # Round-robin GPU assignment
-                        thread = threading.Thread(
-                            target=generate_chunk_parallel,
-                            args=(i, chunk_size, gpu_id),
-                            name=f"GPU-{gpu_id}-Chunk-{i+1}"
+                                results[var_idx] = None
+                            return
+                        
+                        variation_seed = base_seed + var_idx + 1
+                        
+                        # Use backend img2img directly with device-specific generator
+                        variation_params = {k: v for k, v in gen_params.items() if k not in ['seed', 'num_images_per_prompt']}
+                        if variation_seed:
+                            variation_params['seed'] = variation_seed
+                        
+                        print(f"  🔧 GPU {gpu_id}: Generating img2img variation {var_idx+1} with seed {variation_seed}")
+                        
+                        # Call backend img2img directly
+                        result = backend.img2img(
+                            image=base_image,
+                            prompt=request.prompt,
+                            strength=0.15,  # Very low strength for subtle changes
+                            **variation_params
                         )
-                        threads.append(thread)
-                        thread.start()
-                        print(f"  🔥 Started parallel thread for GPU {gpu_id}, chunk {i+1}")
-                    
-                    # Wait for all parallel threads to complete
-                    print(f"  ⏳ Waiting for {len(threads)} parallel GPU threads to complete...")
-                    for i, thread in enumerate(threads):
-                        thread.join()
-                        print(f"  📋 Thread {i+1}/{len(threads)} completed ({thread.name})")
-                    
-                    parallel_elapsed = time.time() - parallel_start_time
-                    
-                    # Collect results in order
-                    for i in range(len(chunks)):
-                        if i in results:
-                            all_images.extend(results[i])
-                        else:
-                            print(f"    ⚠️ Missing results for chunk {i+1}")
-                    
-                    print(f"  🎯 Parallel multi-GPU processing complete in {parallel_elapsed:.1f}s: {len(all_images)} total images")
-                    print(f"  ⚡ Parallel speedup: {len(chunks)} chunks processed simultaneously instead of sequentially")
-                    
-                except Exception as e:
-                    import traceback
-                    error_details = traceback.format_exc()
-                    print(f"  ❌ CRITICAL: Parallel multi-GPU processing failed: {e}")
-                    print(f"  📋 Full traceback: {error_details}")
-                    # Fall back to sequential processing
-                    print(f"  🔄 Falling back to sequential single-GPU processing...")
-                    multi_gpu = False
+                        
+                        # Extract the image from the result
+                        variation = result['image'] if isinstance(result, dict) else result
+                        
+                        # Store results thread-safely
+                        with results_lock:
+                            results[var_idx] = variation
+                        
+                        print(f"  ✅ GPU {gpu_id}: Variation {var_idx+1} complete")
+                        
+                    except Exception as e:
+                        import traceback
+                        error_details = traceback.format_exc()
+                        print(f"  ❌ GPU {gpu_id}: Variation {var_idx+1} failed with exception: {e}")
+                        print(f"  📋 GPU {gpu_id}: Full traceback: {error_details}")
+                        with results_lock:
+                            results[var_idx] = None
                 
-            if not multi_gpu or len(chunks) <= 1 or "multi_backends" not in app_state:
-                # Single GPU or single chunk processing
-                for i, chunk_size in enumerate(chunks):
-                    print(f"  🚀 Generating chunk {i+1}/{len(chunks)}: {chunk_size} images...")
+                # Create and start threads for parallel img2img variations
+                threads = []
+                parallel_start_time = time.time()
+                
+                for i in range(variations_needed):
+                    gpu_id = gpu_list[i % len(gpu_list)]  # Round-robin GPU assignment
+                    thread = threading.Thread(
+                        target=generate_variation_parallel,
+                        args=(i, gpu_id),
+                        name=f"GPU-{gpu_id}-Img2Img-{i+1}"
+                    )
+                    threads.append(thread)
+                    thread.start()
+                    print(f"  � Started parallel img2img thread for GPU {gpu_id}, variation {i+1}")
+                
+                # Wait for all parallel threads to complete
+                print(f"  ⏳ Waiting for {len(threads)} parallel img2img threads to complete...")
+                for i, thread in enumerate(threads):
+                    thread.join()
+                    print(f"  📋 Img2Img thread {i+1}/{len(threads)} completed ({thread.name})")
+                
+                parallel_elapsed = time.time() - parallel_start_time
+                
+                # Collect results in order
+                for i in range(variations_needed):
+                    if i in results and results[i] is not None:
+                        all_images.append(results[i])
+                    else:
+                        print(f"    ⚠️ Missing or failed variation {i+1}, using base image as fallback")
+                        all_images.append(base_image)  # Fallback to base image
+                
+                print(f"  🎯 Parallel multi-GPU img2img processing complete in {parallel_elapsed:.1f}s: {len(all_images)} total images")
+                print(f"  ⚡ Parallel speedup: {variations_needed} variations processed simultaneously")
+                
+            else:
+                # Sequential img2img variations (single GPU or small batches)
+                print(f"  �🔄 Generating {batch_size-1} variations using sequential img2img...")
+                for i in range(1, batch_size):
+                    # Use very low strength for subtle variations
+                    variation_seed = base_seed + i
                     
-                    # Use the same seed for all images in this chunk for coherent variations
-                    batch_params = {**gen_params}
-                    batch_params['num_images_per_prompt'] = chunk_size
+                    # Use backend img2img directly since we have a specific source image
+                    variation_params = {k: v for k, v in gen_params.items() if k not in ['seed', 'num_images_per_prompt']}
+                    if variation_seed:
+                        variation_params['seed'] = variation_seed
                     
-                    if base_seed is not None:
-                        # Use the base seed for this chunk - all images will be subtle variations
-                        batch_params['seed'] = base_seed
-                        print(f"  🎲 Chunk {i+1}: Using seed {base_seed} to generate {chunk_size} subtle variations")
+                    # Call backend img2img directly
+                    result = img_gen.backend.img2img(
+                        image=base_image,
+                        prompt=request.prompt,
+                        strength=0.15,  # Very low strength for subtle changes
+                        **variation_params
+                    )
                     
-                    # Generate chunk using num_images_per_prompt for coherent variations
-                    chunk_images = img_gen.gen(prompt=request.prompt, **batch_params)
-                    
-                    # Ensure we have a list
-                    if not isinstance(chunk_images, list):
-                        chunk_images = [chunk_images]
-                    
-                    all_images.extend(chunk_images)
-                    print(f"  ✅ Chunk {i+1} complete: {len(chunk_images)} subtle variations")
+                    # Extract the image from the result
+                    variation = result['image'] if isinstance(result, dict) else result
+                    all_images.append(variation)
+                    print(f"    Generated variation {i}/{batch_size-1}")
             
-            print(f"✅ Generated {len(all_images)} images total using chunked batching")
+            print(f"✅ Generated {len(all_images)} images using img2img variations")
             
             # Convert all images to base64 using JPEG for much smaller file sizes
             print("📦 Encoding images to JPEG...")
@@ -607,13 +551,19 @@ def create_app(backend_type: str = "kandinsky_local",
             
             elapsed = time.time() - start_time
             avg_time = elapsed / len(all_images) if all_images else 0
-            method = "multi_gpu_backend_batch" if multi_gpu and len(chunks) > 1 and "multi_backends" in app_state else "chunked_batch"
+            
+            # Determine generation method
+            if multi_gpu and has_multi_backends and batch_size > 4:
+                method = "multi_gpu_img2img_variations"
+            else:
+                method = "sequential_img2img_variations"
+            
             print(f"✅ {method.replace('_', ' ').title()} complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
             
             # Create list of seeds that were used for debugging
-            seeds_used = []
-            for i in range(len(all_images)):
-                seeds_used.append(base_seed)  # All images use the same base seed for subtle variations
+            seeds_used = [base_seed]  # Base image seed
+            for i in range(1, len(all_images)):
+                seeds_used.append(base_seed + i)  # Variation seeds
             
             return BatchImageResponse(
                 images=image_b64_list,
@@ -624,14 +574,13 @@ def create_app(backend_type: str = "kandinsky_local",
                     "animation_ready": True,
                     "generation_time": elapsed,
                     "generation_method": method,
-                    "chunks": len(chunks),
-                    "chunk_sizes": chunks,
-                    "gpu_count": gpu_count,
-                    "multi_gpu": multi_gpu,
+                    "multi_gpu": multi_gpu and has_multi_backends and batch_size > 4,
+                    "gpu_count": len(app_state.get("gpu_list", [])) if multi_gpu and has_multi_backends else 1,
                     "seed": request.seed,
                     "base_seed": base_seed,
                     "seeds_used": seeds_used,
-                    "variation_type": "same_seed_subtle_variations"
+                    "variation_method": "img2img_low_strength",
+                    "variation_strength": 0.15
                 }
             )
             
