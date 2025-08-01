@@ -112,13 +112,34 @@ async def lifespan(app: FastAPI):
             backend_kwargs["device"] = f"cuda:{first_gpu}"
             
             if "," in gpu_selection:
-                # Multi-GPU configuration - handled via CUDA_VISIBLE_DEVICES
+                # Multi-GPU configuration - create multiple backend instances
                 gpu_list = [gpu.strip() for gpu in gpu_selection.split(",")]
-                print(f"🎮 Multi-GPU setup: GPUs {gpu_list} (using CUDA_VISIBLE_DEVICES)")
+                print(f"🎮 Multi-GPU setup: Creating backends on GPUs {gpu_list}")
+                
+                # Create primary backend on first GPU
+                app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
+                
+                # Create additional backends for other GPUs
+                multi_backends = {"0": app_state["img_gen"]}  # GPU 0 (first GPU)
+                
+                for i, gpu_id in enumerate(gpu_list[1:], 1):  # Start from second GPU
+                    try:
+                        gpu_backend_kwargs = {**backend_kwargs}
+                        gpu_backend_kwargs["device"] = f"cuda:{gpu_id}"
+                        gpu_backend = ImgGen(backend=backend_type, config=config, **gpu_backend_kwargs)
+                        multi_backends[gpu_id] = gpu_backend
+                        print(f"  ✅ Backend {i+1} loaded on GPU {gpu_id}")
+                    except Exception as e:
+                        print(f"  ❌ Failed to load backend on GPU {gpu_id}: {e}")
+                
+                app_state["multi_backends"] = multi_backends
+                app_state["gpu_list"] = gpu_list
+                print(f"🎯 Multi-GPU setup complete: {len(multi_backends)} backends ready")
             else:
                 print(f"🎮 Single GPU setup: GPU {gpu_selection}")
-        
-        app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
+                app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
+        else:
+            app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
         app_state["config"] = config
         print(f"✅ Model loaded successfully: {backend_type}")
     except Exception as e:
@@ -131,7 +152,16 @@ async def lifespan(app: FastAPI):
     if "img_gen" in app_state and app_state["img_gen"]:
         if hasattr(app_state["img_gen"].backend, 'cleanup'):
             app_state["img_gen"].backend.cleanup()
-        print("🧹 Cleaned up resources")
+        print("🧹 Cleaned up primary backend")
+    
+    # Clean up additional GPU backends
+    if "multi_backends" in app_state:
+        multi_backends = app_state["multi_backends"]
+        for gpu_id, backend in multi_backends.items():
+            if backend and backend != app_state.get("img_gen"):  # Don't double-cleanup primary
+                if hasattr(backend.backend, 'cleanup'):
+                    backend.backend.cleanup()
+        print(f"🧹 Cleaned up {len(multi_backends)} GPU backends")
 
 
 def create_app(backend_type: str = "kandinsky_local", 
@@ -363,30 +393,68 @@ def create_app(backend_type: str = "kandinsky_local",
                 gpu_info = f" across {gpu_count} GPUs" if multi_gpu else ""
                 print(f"  🧩 Splitting into {len(chunks)} chunks{gpu_info}: {chunks}")
             
-            # Generate images in chunks
+            # Generate images in chunks with multi-GPU distribution
             all_images = []
             base_seed = request.seed
             
-            for i, chunk_size in enumerate(chunks):
-                print(f"  🚀 Generating chunk {i+1}/{len(chunks)}: {chunk_size} images...")
+            if multi_gpu and len(chunks) > 1 and "multi_backends" in app_state:
+                # True multi-GPU processing with separate backend instances
+                multi_backends = app_state["multi_backends"]
+                gpu_list = app_state["gpu_list"]
+                print(f"  🎮 Processing {len(chunks)} chunks across {len(gpu_list)} GPU backends: {gpu_list}")
                 
-                # Use different seeds for each chunk to ensure variety
-                batch_params = {**gen_params}
-                batch_params['num_images_per_prompt'] = chunk_size
+                for i, chunk_size in enumerate(chunks):
+                    gpu_id = gpu_list[i % len(gpu_list)]  # Round-robin GPU assignment
+                    backend = multi_backends.get(gpu_id)
+                    
+                    if backend is None:
+                        print(f"  ⚠️ No backend available for GPU {gpu_id}, using primary backend")
+                        backend = img_gen
+                    
+                    print(f"  🚀 GPU {gpu_id}: Generating chunk {i+1}/{len(chunks)} ({chunk_size} images)...")
+                    
+                    # Use different seeds for each chunk to ensure variety
+                    batch_params = {**gen_params}
+                    batch_params['num_images_per_prompt'] = chunk_size
+                    
+                    if base_seed is not None:
+                        # Offset seed for each chunk to get variations
+                        batch_params['seed'] = base_seed + i * 1000
+                    
+                    # Generate chunk using the specific GPU backend
+                    chunk_images = backend.gen(prompt=request.prompt, **batch_params)
+                    
+                    # Ensure we have a list
+                    if not isinstance(chunk_images, list):
+                        chunk_images = [chunk_images]
+                    
+                    all_images.extend(chunk_images) 
+                    print(f"  ✅ GPU {gpu_id}: Chunk {i+1} complete ({len(chunk_images)} images)")
                 
-                if base_seed is not None:
-                    # Offset seed for each chunk to get variations
-                    batch_params['seed'] = base_seed + i * 1000
+                print(f"  🎯 Multi-GPU processing complete: {len(all_images)} total images")
                 
-                # Generate chunk
-                chunk_images = img_gen.gen(prompt=request.prompt, **batch_params)
-                
-                # Ensure we have a list
-                if not isinstance(chunk_images, list):
-                    chunk_images = [chunk_images]
-                
-                all_images.extend(chunk_images)
-                print(f"  ✅ Chunk {i+1} complete: {len(chunk_images)} images")
+            else:
+                # Single GPU or single chunk processing
+                for i, chunk_size in enumerate(chunks):
+                    print(f"  🚀 Generating chunk {i+1}/{len(chunks)}: {chunk_size} images...")
+                    
+                    # Use different seeds for each chunk to ensure variety
+                    batch_params = {**gen_params}
+                    batch_params['num_images_per_prompt'] = chunk_size
+                    
+                    if base_seed is not None:
+                        # Offset seed for each chunk to get variations
+                        batch_params['seed'] = base_seed + i * 1000
+                    
+                    # Generate chunk
+                    chunk_images = img_gen.gen(prompt=request.prompt, **batch_params)
+                    
+                    # Ensure we have a list
+                    if not isinstance(chunk_images, list):
+                        chunk_images = [chunk_images]
+                    
+                    all_images.extend(chunk_images)
+                    print(f"  ✅ Chunk {i+1} complete: {len(chunk_images)} images")
             
             print(f"✅ Generated {len(all_images)} images total using chunked batching")
             
@@ -402,7 +470,8 @@ def create_app(backend_type: str = "kandinsky_local",
             
             elapsed = time.time() - start_time
             avg_time = elapsed / len(all_images) if all_images else 0
-            print(f"✅ Chunked batch complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
+            method = "multi_gpu_backend_batch" if multi_gpu and len(chunks) > 1 and "multi_backends" in app_state else "chunked_batch"
+            print(f"✅ {method.replace('_', ' ').title()} complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
             
             return BatchImageResponse(
                 images=image_b64_list,
@@ -412,9 +481,11 @@ def create_app(backend_type: str = "kandinsky_local",
                     "batch_size": len(image_b64_list),
                     "animation_ready": True,
                     "generation_time": elapsed,
-                    "generation_method": "chunked_batch",
+                    "generation_method": method,
                     "chunks": len(chunks),
                     "chunk_sizes": chunks,
+                    "gpu_count": gpu_count,
+                    "multi_gpu": multi_gpu,
                     "seed": request.seed
                 }
             )
