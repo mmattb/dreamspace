@@ -280,13 +280,22 @@ def create_app(backend_type: str = "kandinsky_local",
             for i in range(1, batch_size):
                 # Use very low strength for subtle variations
                 variation_seed = base_seed + i
-                variation = img_gen.gen_img2img(
+                
+                # Use backend img2img directly since we have a specific source image
+                variation_params = {k: v for k, v in gen_params.items() if k not in ['seed', 'num_images_per_prompt']}
+                if variation_seed:
+                    variation_params['seed'] = variation_seed
+                
+                # Call backend img2img directly
+                result = img_gen.backend.img2img(
                     image=base_image,
                     prompt=request.prompt,
                     strength=0.15,  # Very low strength for subtle changes
-                    seed=variation_seed,
-                    **{k: v for k, v in gen_params.items() if k not in ['seed', 'num_images_per_prompt']}
+                    **variation_params
                 )
+                
+                # Extract the image from the result
+                variation = result['image'] if isinstance(result, dict) else result
                 images.append(variation)
                 print(f"    Generated variation {i+1}/{batch_size-1}")
             
