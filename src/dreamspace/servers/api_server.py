@@ -409,6 +409,10 @@ def create_app(backend_type: str = "kandinsky_local",
                 def generate_variation_parallel(var_idx, gpu_id):
                     """Generate a single img2img variation on a specific GPU backend."""
                     try:
+                        # Set CUDA device context at the start of each thread
+                        import torch
+                        torch.cuda.set_device(gpu_id)
+                        
                         img_gen_instance = multi_backends.get(gpu_id)
                         if img_gen_instance is None:
                             print(f"  ⚠️ No img_gen instance available for GPU {gpu_id}, skipping variation {var_idx+1}")
@@ -430,6 +434,10 @@ def create_app(backend_type: str = "kandinsky_local",
                             variation_params['seed'] = variation_seed
                         
                         print(f"  🔧 GPU {gpu_id}: Generating img2img variation {var_idx+1} with seed {variation_seed}")
+                        
+                        # Clear CUDA cache before processing
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                         
                         # Call backend img2img directly with local image copy
                         result = backend.img2img(
@@ -455,6 +463,13 @@ def create_app(backend_type: str = "kandinsky_local",
                         print(f"  📋 GPU {gpu_id}: Full traceback: {error_details}")
                         with results_lock:
                             results[var_idx] = None
+                        
+                        # Clear CUDA cache on error
+                        try:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except:
+                            pass
                 
                 # Create and start threads for parallel img2img variations
                 threads = []

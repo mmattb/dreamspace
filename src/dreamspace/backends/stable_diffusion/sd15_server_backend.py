@@ -108,6 +108,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     
     def img2img(self, image: Image.Image, prompt: str, strength: float = 0.5, **kwargs) -> Dict[str, Any]:
         """Transform an existing image using a text prompt."""
+        # Ensure we're working with the correct CUDA context
+        torch.cuda.set_device(self.device)
+        
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
@@ -115,19 +118,65 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             device = self.device if hasattr(self, 'device') else 'cuda'
             kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
         
-        result = self.img2img_pipe(
-            prompt=prompt,
-            image=image,
-            strength=strength,
-            return_dict=True,
-            **kwargs
-        )
-        
-        return {
-            'image': result.images[0],
-            'latents': getattr(result, 'latents', None),
-            'embeddings': self._extract_text_embeddings(prompt)
-        }
+        try:
+            # Ensure image is in correct format and clean any CUDA references
+            if hasattr(image, '_tensor'):
+                # If image has tensor attributes, recreate it cleanly
+                from io import BytesIO
+                buffer = BytesIO()
+                image.save(buffer, format='PNG')
+                buffer.seek(0)
+                image = Image.open(buffer)
+            
+            # Clear any cached GPU memory before processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            result = self.img2img_pipe(
+                prompt=prompt,
+                image=image,
+                strength=strength,
+                return_dict=True,
+                **kwargs
+            )
+            
+            return {
+                'image': result.images[0],
+                'latents': getattr(result, 'latents', None),
+                'embeddings': self._extract_text_embeddings(prompt)
+            }
+            
+        except RuntimeError as e:
+            if "CUDA error" in str(e) or "device" in str(e).lower():
+                print(f"⚠️ CUDA device error in img2img on {self.device}: {e}")
+                # Try to recover by clearing cache and retrying once
+                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                
+                # Recreate the image cleanly to remove any GPU references
+                from io import BytesIO
+                buffer = BytesIO()
+                image.save(buffer, format='PNG')
+                buffer.seek(0)
+                clean_image = Image.open(buffer)
+                
+                # Retry with clean image
+                result = self.img2img_pipe(
+                    prompt=prompt,
+                    image=clean_image,
+                    strength=strength,
+                    return_dict=True,
+                    **kwargs
+                )
+                
+                return {
+                    'image': result.images[0],
+                    'latents': getattr(result, 'latents', None),
+                    'embeddings': self._extract_text_embeddings(prompt)
+                }
+            else:
+                raise
     
     def interpolate_embeddings(self, embedding1: Any, embedding2: Any, alpha: float) -> Any:
         """Interpolate between two text embeddings."""
