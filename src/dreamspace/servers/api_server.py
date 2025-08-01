@@ -400,6 +400,12 @@ def create_app(backend_type: str = "kandinsky_local",
                 results = {}
                 results_lock = threading.Lock()
                 
+                # Convert base image to bytes for thread-safe sharing
+                from io import BytesIO
+                base_image_buffer = BytesIO()
+                base_image.save(base_image_buffer, format='PNG')
+                base_image_bytes = base_image_buffer.getvalue()
+                
                 def generate_variation_parallel(var_idx, gpu_id):
                     """Generate a single img2img variation on a specific GPU backend."""
                     try:
@@ -413,6 +419,9 @@ def create_app(backend_type: str = "kandinsky_local",
                         # Access the actual backend through the ImgGen wrapper
                         backend = img_gen_instance.backend
                         
+                        # Recreate base image from bytes in this thread's context
+                        base_image_local = Image.open(BytesIO(base_image_bytes))
+                        
                         variation_seed = base_seed + var_idx + 1
                         
                         # Use backend img2img directly with device-specific generator
@@ -422,9 +431,9 @@ def create_app(backend_type: str = "kandinsky_local",
                         
                         print(f"  🔧 GPU {gpu_id}: Generating img2img variation {var_idx+1} with seed {variation_seed}")
                         
-                        # Call backend img2img directly
+                        # Call backend img2img directly with local image copy
                         result = backend.img2img(
-                            image=base_image,
+                            image=base_image_local,
                             prompt=request.prompt,
                             strength=0.15,  # Very low strength for subtle changes
                             **variation_params
