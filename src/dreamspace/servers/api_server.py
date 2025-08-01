@@ -259,45 +259,27 @@ def create_app(backend_type: str = "kandinsky_local",
                 if v is not None and k not in ['prompt', 'batch_size']
             }
             
-            print(f"🎬 Generating batch of {batch_size} subtle variations...")
+            print(f"🎬 Generating batch of {batch_size} variations in parallel...")
             start_time = time.time()
             
-            # Generate variations using img2img for consistency
-            images = []
+            # Use true batch generation for speed
+            # Set num_images_per_prompt to generate multiple images at once
+            batch_params = {**gen_params}
+            batch_params['num_images_per_prompt'] = batch_size
             
-            # First, generate a base image
-            base_seed = request.seed or 42
-            base_params = {**gen_params, 'seed': base_seed}
-            # Remove batch parameter for single generation
-            base_params.pop('num_images_per_prompt', None)
+            # Use a base seed for consistency
+            if request.seed is not None:
+                batch_params['seed'] = request.seed
             
-            print(f"  � Generating base image with seed {base_seed}...")
-            base_image = img_gen.gen(prompt=request.prompt, **base_params)
-            images.append(base_image)
+            print(f"  🚀 Generating {batch_size} images concurrently...")
+            # Generate all images in one batch call
+            images = img_gen.gen(prompt=request.prompt, **batch_params)
             
-            # Generate variations using img2img with low strength
-            print(f"  🔄 Generating {batch_size-1} variations using img2img...")
-            for i in range(1, batch_size):
-                # Use very low strength for subtle variations
-                variation_seed = base_seed + i
-                
-                # Use backend img2img directly since we have a specific source image
-                variation_params = {k: v for k, v in gen_params.items() if k not in ['seed', 'num_images_per_prompt']}
-                if variation_seed:
-                    variation_params['seed'] = variation_seed
-                
-                # Call backend img2img directly
-                result = img_gen.backend.img2img(
-                    image=base_image,
-                    prompt=request.prompt,
-                    strength=0.15,  # Very low strength for subtle changes
-                    **variation_params
-                )
-                
-                # Extract the image from the result
-                variation = result['image'] if isinstance(result, dict) else result
-                images.append(variation)
-                print(f"    Generated variation {i+1}/{batch_size-1}")
+            # Ensure we have a list of images
+            if not isinstance(images, list):
+                images = [images]
+            
+            print(f"✅ Generated {len(images)} images in batch")
             
             # Convert all images to base64
             image_b64_list = []
@@ -319,8 +301,8 @@ def create_app(backend_type: str = "kandinsky_local",
                     "batch_size": len(image_b64_list),
                     "animation_ready": True,
                     "generation_time": elapsed,
-                    "variation_method": "img2img_low_strength",
-                    "base_seed": base_seed
+                    "generation_method": "concurrent_batch",
+                    "seed": request.seed
                 }
             )
             
