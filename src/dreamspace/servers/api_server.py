@@ -13,8 +13,14 @@ from pydantic import BaseModel, Field
 from PIL import Image
 import uvicorn
 
-from ...core.image_gen import ImgGen
-from ...config.settings import Config
+try:
+    # Try relative imports first (when used as a package)
+    from ...core.image_gen import ImgGen
+    from ...config.settings import Config
+except ImportError:
+    # Fall back to absolute imports (when used as a script)
+    from dreamspace.core.image_gen import ImgGen
+    from dreamspace.config.settings import Config
 
 
 # Request/Response models
