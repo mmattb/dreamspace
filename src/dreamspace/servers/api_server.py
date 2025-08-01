@@ -29,8 +29,8 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(..., description="Text prompt for image generation")
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
     num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
-    width: Optional[int] = Field(512, description="Image width")
-    height: Optional[int] = Field(512, description="Image height")
+    width: Optional[int] = Field(768, description="Image width")
+    height: Optional[int] = Field(768, description="Image height")
     seed: Optional[int] = Field(None, description="Seed for reproducibility")
     batch_size: Optional[int] = Field(1, description="Number of images to generate (1-32)")
 
@@ -40,8 +40,8 @@ class GenerateBatchRequest(BaseModel):
     batch_size: int = Field(..., description="Number of variations to generate (1-32)")
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
     num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
-    width: Optional[int] = Field(512, description="Image width")
-    height: Optional[int] = Field(512, description="Image height")
+    width: Optional[int] = Field(768, description="Image width")
+    height: Optional[int] = Field(768, description="Image height")
     seed: Optional[int] = Field(None, description="Base seed for variations")
 
 
@@ -56,8 +56,8 @@ class Img2ImgRequest(BaseModel):
     strength: float = Field(0.5, description="Transformation strength (0.0-1.0)")
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
     num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
-    width: Optional[int] = Field(512, description="Image width")
-    height: Optional[int] = Field(512, description="Image height")
+    width: Optional[int] = Field(768, description="Image width")
+    height: Optional[int] = Field(768, description="Image height")
     seed: Optional[int] = Field(None, description="Seed for reproducibility")
 
 

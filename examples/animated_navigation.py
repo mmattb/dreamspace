@@ -122,28 +122,34 @@ class AnimatedRemoteImgGen:
         return len(self.current_frames) > 0
 
 
-def show_image(img: Image.Image, window):
-    """Display PIL Image in pygame window."""
+def show_image(img: Image.Image, window, target_width: int = 768, target_height: int = 768, window_size: int = 768):
+    """Display PIL Image in pygame window, centered if non-square."""
     if img is None:
         return
-    img = img.resize((512, 512))
+    
+    # Resize image to target dimensions
+    img = img.resize((target_width, target_height))
     mode = img.mode
     size = img.size
     data = img.tobytes()
     py_img = pygame.image.fromstring(data, size, mode)
-    window.blit(py_img, (0, 0))
+    
+    # Center the image in the window if it's not square
+    x_offset = (window_size - target_width) // 2
+    y_offset = (window_size - target_height) // 2
+    window.blit(py_img, (x_offset, y_offset))
 
 
-def draw_ui(window, font, status_text, frame_info, generation_status):
+def draw_ui(window, font, status_text, frame_info, generation_status, window_size=512):
     """Draw UI overlay."""
     # Semi-transparent overlay
-    overlay = pygame.Surface((512, 100))
+    overlay = pygame.Surface((window_size, 100))
     overlay.set_alpha(180)
     overlay.fill((0, 0, 0))
-    window.blit(overlay, (0, 412))
+    window.blit(overlay, (0, window_size - 100))
     
     # Status text
-    y_offset = 420
+    y_offset = window_size - 92
     for line in status_text:
         text_surface = font.render(line, True, (255, 255, 255))
         window.blit(text_surface, (10, y_offset))
@@ -152,12 +158,12 @@ def draw_ui(window, font, status_text, frame_info, generation_status):
     # Frame info
     if frame_info:
         frame_surface = font.render(frame_info, True, (0, 255, 0))
-        window.blit(frame_surface, (10, 490))
+        window.blit(frame_surface, (10, window_size - 22))
     
     # Generation status
     if generation_status:
         gen_surface = font.render(generation_status, True, (255, 255, 0))
-        window.blit(gen_surface, (10, 470))
+        window.blit(gen_surface, (10, window_size - 42))
 
 
 def main():
@@ -167,10 +173,27 @@ def main():
     if not server_url:
         server_url = "http://172.28.5.21:8001"
     
-    # Initialize pygame
+    # Image size configuration
+    size_input = input("Enter image size (512, 768, 1024) or WxH (e.g., 768x512): ").strip()
+    if 'x' in size_input:
+        try:
+            width_str, height_str = size_input.split('x')
+            image_width = int(width_str)
+            image_height = int(height_str)
+        except ValueError:
+            image_width = image_height = 768
+    elif size_input and size_input.isdigit():
+        image_width = image_height = int(size_input)
+    else:
+        image_width = image_height = 768
+    
+    print(f"🖼️ Using image size: {image_width}x{image_height}")
+    
+    # Initialize pygame with the larger dimension for window size
+    window_size = max(image_width, image_height)
     pygame.init()
     pygame.font.init()
-    win = pygame.display.set_mode((512, 512))
+    win = pygame.display.set_mode((window_size, window_size))
     pygame.display.set_caption("Dreamspace Navigator - Animated")
     font = pygame.font.Font(None, 20)
     clock = pygame.time.Clock()
@@ -192,6 +215,12 @@ def main():
     animation_speed = 8  # FPS for animation
     batch_size = 16  # Smaller batches for faster generation
     
+    # Generation parameters
+    generation_params = {
+        "width": image_width,
+        "height": image_height
+    }
+    
     # Navigation parameters
     current_prompt = img_gen.prompt
     
@@ -207,7 +236,7 @@ def main():
     try:
         # Generate initial animation
         def generate_initial():
-            img_gen.generate_animation_batch(batch_size=batch_size)
+            img_gen.generate_animation_batch(batch_size=batch_size, **generation_params)
         
         # Start generation in background
         gen_thread = threading.Thread(target=generate_initial)
@@ -349,7 +378,7 @@ def main():
                     # Start generation in background thread
                     def generate_batch():
                         try:
-                            img_gen.generate_animation_batch(prompt=gen_prompt, batch_size=batch_size)
+                            img_gen.generate_animation_batch(prompt=gen_prompt, batch_size=batch_size, **generation_params)
                         except Exception as e:
                             print(f"❌ Background generation failed: {e}")
                     
@@ -365,7 +394,7 @@ def main():
         win.fill((0, 0, 0))
         current_frame = img_gen.get_current_frame()
         if current_frame:
-            show_image(current_frame, win)
+            show_image(current_frame, win, image_width, image_height, window_size)
         
         # Prepare UI text
         status_lines = [
@@ -384,7 +413,7 @@ def main():
             generation_status = "🎬 Generating in background..."
         
         # Draw UI
-        draw_ui(win, font, status_lines, frame_info, generation_status)
+        draw_ui(win, font, status_lines, frame_info, generation_status, window_size)
         
         pygame.display.flip()
         clock.tick(animation_speed if animation_enabled else 30)
@@ -401,4 +430,272 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Animated Dreamspace Navigation")
+    parser.add_argument("--width", type=int, default=768, help="Image width")
+    parser.add_argument("--height", type=int, default=768, help="Image height") 
+    parser.add_argument("--size", type=int, help="Square image size (overrides width/height)")
+    parser.add_argument("--server", type=str, default="http://172.28.5.21:8001",
+                       help="Server URL")
+    parser.add_argument("--batch-size", type=int, default=16,
+                       help="Animation batch size")
+    
+    args = parser.parse_args()
+    
+    # Handle size configuration
+    if args.size:
+        image_width = image_height = args.size
+    else:
+        image_width = args.width
+        image_height = args.height
+    
+    # Override the main function to use command line args
+    def main_with_args():
+        """Main with command line arguments."""
+        server_url = args.server
+        
+        print(f"🖼️ Using image size: {image_width}x{image_height}")
+        print(f"🌐 Server: {server_url}")
+        
+        # Initialize pygame with the larger dimension for window size
+        window_size = max(image_width, image_height)
+        pygame.init()
+        pygame.font.init()
+        win = pygame.display.set_mode((window_size, window_size))
+        pygame.display.set_caption("Dreamspace Navigator - Animated")
+        font = pygame.font.Font(None, 20)
+        clock = pygame.time.Clock()
+        
+        # Initialize animated image generator
+        print("🔮 Connecting to remote server...")
+        try:
+            img_gen = AnimatedRemoteImgGen(
+                server_url=server_url,
+                initial_prompt="a surreal dreamlike forest, ethereal lighting"
+            )
+        except Exception as e:
+            print(f"❌ Failed to connect: {e}")
+            pygame.quit()
+            return
+        
+        # Animation settings
+        animation_enabled = True
+        animation_speed = 8  # FPS for animation
+        batch_size = args.batch_size  # Use command line batch size
+        
+        # Generation parameters
+        generation_params = {
+            "width": image_width,
+            "height": image_height
+        }
+        
+        # Navigation parameters
+        current_prompt = img_gen.prompt
+        
+        # Effect modifiers
+        effects = [
+            "glowing light", "misty atmosphere", "golden hour lighting",
+            "ethereal glow", "deep shadows", "vibrant colors",
+            "soft focus", "mystical energy", "dreamy blur", "cosmic energy"
+        ]
+        current_effects = []
+        
+        print(f"🎬 Generating initial animation batch ({batch_size} frames)...")
+        try:
+            # Generate initial animation
+            def generate_initial():
+                img_gen.generate_animation_batch(batch_size=batch_size, **generation_params)
+            
+            # Start generation in background
+            gen_thread = threading.Thread(target=generate_initial)
+            gen_thread.start()
+            
+            # Show loading screen
+            loading_frame = 0
+            while gen_thread.is_alive():
+                win.fill((20, 20, 30))
+                loading_text = f"Generating animation batch... {'.' * (loading_frame % 4)}"
+                text_surface = font.render(loading_text, True, (255, 255, 255))
+                win.blit(text_surface, (10, window_size // 2))
+                pygame.display.flip()
+                pygame.time.wait(100)
+                loading_frame += 1
+                
+                # Handle quit events during loading
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        print("🛑 Stopping generation...")
+                        pygame.quit()
+                        return
+            
+            gen_thread.join()
+            print("🖼️ Initial animation ready!")
+            
+        except Exception as e:
+            print(f"❌ Failed to generate initial animation: {e}")
+            pygame.quit()
+            return
+        
+        print("\\n🎮 Animated Controls:")
+        print("  ← → ↑ ↓ : Navigate (generates new animation loops)")
+        print("  Space: Add random effects")
+        print("  R: Reset effects")
+        print("  A: Toggle animation on/off")
+        print("  F: Cycle animation speed")
+        print("  S: Save current frame")
+        print("  Escape: Exit")
+        print(f"\\n🌟 Starting with prompt: '{current_prompt}'")
+        print(f"🌐 Server: {server_url}")
+        print(f"📏 Size: {image_width}x{image_height}")
+        
+        # Main event loop
+        running = True
+        frame_counter = 0
+        last_generation_time = time.time()
+        
+        # Background generation thread tracking
+        generation_thread = None
+        pending_prompt = None
+        
+        while running:
+            # Handle events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                    break
+                
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                        break
+                    
+                    # Skip input if currently generating
+                    if img_gen.is_generating:
+                        print("⏳ Generation in progress, please wait...")
+                        continue
+                    
+                    # Prepare generation parameters
+                    gen_prompt = current_prompt
+                    if current_effects:
+                        gen_prompt += ", " + ", ".join(current_effects)
+                    
+                    new_animation_needed = False
+                    
+                    # Navigation controls
+                    if event.key == pygame.K_RIGHT:
+                        gen_prompt += ", more vibrant, enhanced details"
+                        new_animation_needed = True
+                        print("➡️ Moving right in parameter space...")
+                    
+                    elif event.key == pygame.K_LEFT:
+                        gen_prompt += ", softer, muted tones"
+                        new_animation_needed = True
+                        print("⬅️ Moving left in parameter space...")
+                    
+                    elif event.key == pygame.K_UP:
+                        gen_prompt += ", brighter, uplifting mood"
+                        new_animation_needed = True
+                        print("⬆️ Moving up in parameter space...")
+                    
+                    elif event.key == pygame.K_DOWN:
+                        gen_prompt += ", darker, mysterious atmosphere"
+                        new_animation_needed = True
+                        print("⬇️ Moving down in parameter space...")
+                    
+                    elif event.key == pygame.K_SPACE:
+                        # Add a random effect
+                        import random
+                        if len(current_effects) < 3:
+                            new_effect = random.choice([e for e in effects if e not in current_effects])
+                            current_effects.append(new_effect)
+                            print(f"✨ Added effect: '{new_effect}'")
+                            gen_prompt = current_prompt + ", " + ", ".join(current_effects)
+                            new_animation_needed = True
+                        else:
+                            print("🚫 Maximum effects reached. Press 'R' to reset.")
+                    
+                    elif event.key == pygame.K_r:
+                        # Reset effects
+                        current_effects.clear()
+                        print("🔄 Effects reset")
+                        gen_prompt = current_prompt
+                        new_animation_needed = True
+                    
+                    elif event.key == pygame.K_a:
+                        # Toggle animation
+                        animation_enabled = not animation_enabled
+                        status = "enabled" if animation_enabled else "disabled"
+                        print(f"🎬 Animation {status}")
+                    
+                    elif event.key == pygame.K_f:
+                        # Cycle animation speed
+                        speeds = [4, 8, 12, 16, 24]
+                        current_idx = speeds.index(animation_speed) if animation_speed in speeds else 0
+                        animation_speed = speeds[(current_idx + 1) % len(speeds)]
+                        print(f"⚡ Animation speed: {animation_speed} FPS")
+                    
+                    elif event.key == pygame.K_s:
+                        # Save current frame
+                        current_frame = img_gen.get_current_frame()
+                        if current_frame:
+                            filename = f"dreamspace_animated_{image_width}x{image_height}_{int(time.time())}.png"
+                            current_frame.save(filename)
+                            print(f"💾 Saved: {filename}")
+                    
+                    # Generate new animation if needed
+                    if new_animation_needed:
+                        # Start generation in background thread
+                        def generate_batch():
+                            try:
+                                img_gen.generate_animation_batch(prompt=gen_prompt, batch_size=batch_size, **generation_params)
+                            except Exception as e:
+                                print(f"❌ Background generation failed: {e}")
+                        
+                        generation_thread = threading.Thread(target=generate_batch)
+                        generation_thread.start()
+                        pending_prompt = gen_prompt
+            
+            # Update animation frame
+            if animation_enabled and img_gen.has_frames():
+                img_gen.advance_frame()
+            
+            # Draw current frame
+            win.fill((0, 0, 0))
+            current_frame = img_gen.get_current_frame()
+            if current_frame:
+                show_image(current_frame, win, image_width, image_height, window_size)
+            
+            # Prepare UI text
+            status_lines = [
+                f"Effects: {', '.join(current_effects) if current_effects else 'None'}",
+                f"Animation: {'ON' if animation_enabled else 'OFF'} ({animation_speed} FPS)"
+            ]
+            
+            frame_info = ""
+            if img_gen.has_frames():
+                frame_info = f"Frame: {img_gen.frame_index + 1}/{len(img_gen.current_frames)}"
+            
+            generation_status = ""
+            if img_gen.is_generating:
+                generation_status = "🎬 Generating new animation..."
+            elif generation_thread and generation_thread.is_alive():
+                generation_status = "🎬 Generating in background..."
+            
+            # Draw UI
+            draw_ui(win, font, status_lines, frame_info, generation_status, window_size)
+            
+            pygame.display.flip()
+            clock.tick(animation_speed if animation_enabled else 30)
+            frame_counter += 1
+        
+        # Cleanup
+        print("🧹 Shutting down...")
+        if generation_thread and generation_thread.is_alive():
+            print("⏳ Waiting for background generation to complete...")
+            generation_thread.join(timeout=5)
+        
+        pygame.quit()
+        print("👋 Goodbye!")
+    
+    main_with_args()
