@@ -337,6 +337,7 @@ def create_app(backend_type: str = "kandinsky_local",
     ):
         """Generate a batch of image variations for animation with smart chunking for multi-GPU."""
         import traceback
+        import time
         
         try:
             print(f"🔍 DEBUG: Starting generate_batch endpoint")
@@ -372,7 +373,6 @@ def create_app(backend_type: str = "kandinsky_local",
             print(f"🔍 DEBUG: Multi-GPU enabled: {multi_gpu}")
             
         except Exception as e:
-            import traceback
             error_details = traceback.format_exc()
             print(f"❌ CRITICAL ERROR in generate_batch endpoint initialization: {e}")
             print(f"📋 Full traceback: {error_details}")
