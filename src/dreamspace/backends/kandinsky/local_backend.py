@@ -108,10 +108,18 @@ class LocalKandinskyBackend(ImgGenBackend):
         if 'generator' not in kwargs and 'seed' in kwargs:
             kwargs['generator'] = torch.Generator(self.device).manual_seed(kwargs.pop('seed'))
         
+        # Check if batch generation is requested
+        num_images = kwargs.get('num_images_per_prompt', 1)
+        
         # Generate image embeddings from text
         prior_result = self.prior_pipe(prompt, return_dict=True)
         image_embeds = prior_result.image_embeds
         negative_embeds = prior_result.negative_image_embeds
+        
+        # For batch generation, repeat embeddings
+        if num_images > 1:
+            image_embeds = image_embeds.repeat(num_images, 1)
+            negative_embeds = negative_embeds.repeat(num_images, 1)
         
         # Generate image from embeddings
         result = self.pipe(
@@ -121,8 +129,12 @@ class LocalKandinskyBackend(ImgGenBackend):
             **kwargs
         )
         
+        # Return single image or list based on num_images_per_prompt
+        images = result.images
+        return_image = images[0] if num_images == 1 else images
+        
         return {
-            'image': result.images[0],
+            'image': return_image,
             'latents': None,  # Kandinsky doesn't typically expose latents
             'embeddings': image_embeds
         }

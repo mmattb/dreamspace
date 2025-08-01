@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import time
 from io import BytesIO
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
@@ -258,34 +259,39 @@ def create_app(backend_type: str = "kandinsky_local",
                 if v is not None and k not in ['prompt', 'batch_size']
             }
             
-            print(f"🎬 Generating batch of {batch_size} variations...")
-            images = []
-            image_b64_list = []
+            # Add batch generation parameter
+            gen_params['num_images_per_prompt'] = batch_size
             
-            base_seed = request.seed
-            for i in range(batch_size):
-                if base_seed is not None:
-                    gen_params['seed'] = base_seed + i
-                
-                print(f"  Generating {i+1}/{batch_size}...")
-                image = img_gen.gen(prompt=request.prompt, **gen_params)
-                images.append(image)
-                
-                # Convert to base64
+            print(f"🎬 Generating batch of {batch_size} variations...")
+            start_time = time.time()
+            
+            # Generate batch of images
+            images = img_gen.gen(prompt=request.prompt, **gen_params)
+            
+            # Handle both single image and list of images
+            if not isinstance(images, list):
+                images = [images]
+            
+            # Convert all images to base64
+            image_b64_list = []
+            for i, image in enumerate(images):
                 buffer = BytesIO()
                 image.save(buffer, format='PNG')
                 image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
                 image_b64_list.append(image_b64)
+                print(f"  Encoded image {i+1}/{len(images)}")
             
-            print(f"✅ Batch generation complete!")
+            elapsed = time.time() - start_time
+            print(f"✅ Batch generation complete in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per image)")
             
             return BatchImageResponse(
                 images=image_b64_list,
                 metadata={
                     "prompt": request.prompt,
                     "parameters": gen_params,
-                    "batch_size": batch_size,
-                    "animation_ready": True
+                    "batch_size": len(image_b64_list),
+                    "animation_ready": True,
+                    "generation_time": elapsed
                 }
             )
             

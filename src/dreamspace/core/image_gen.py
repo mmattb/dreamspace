@@ -146,7 +146,7 @@ class ImgGen:
         self._recent_latents.append(latent)
         self._recent_prompts.append(prompt or self.prompt)
     
-    def gen(self, prompt: Optional[str] = None, **kwargs) -> Image.Image:
+    def gen(self, prompt: Optional[str] = None, **kwargs) -> Union[Image.Image, List[Image.Image]]:
         """Generate a new image from text prompt.
         
         Args:
@@ -154,7 +154,7 @@ class ImgGen:
             **kwargs: Generation parameters to override defaults
             
         Returns:
-            Generated PIL Image
+            Generated PIL Image or list of images if num_images_per_prompt > 1
             
         Raises:
             ValueError: If no prompt is provided
@@ -166,18 +166,40 @@ class ImgGen:
         # Merge generation parameters
         params = {**self.generation_params, **kwargs}
         
+        # Check if batch generation is requested
+        num_images = params.get('num_images_per_prompt', 1)
+        
         # Generate
         result = self.backend.generate(use_prompt, **params)
         
-        # Register result
-        self.register(
-            result['image'], 
-            result.get('embeddings'), 
-            result.get('latents'),
-            use_prompt
-        )
-        
-        return result['image']
+        # Handle single or multiple images
+        if num_images > 1:
+            # Multiple images - result should contain list
+            images = result['image'] if isinstance(result['image'], list) else [result['image']]
+            
+            # Register the first image for continuity
+            if images:
+                self.register(
+                    images[0], 
+                    result.get('embeddings'), 
+                    result.get('latents'),
+                    use_prompt
+                )
+            
+            return images
+        else:
+            # Single image
+            image = result['image'] if not isinstance(result['image'], list) else result['image'][0]
+            
+            # Register result
+            self.register(
+                image, 
+                result.get('embeddings'), 
+                result.get('latents'),
+                use_prompt
+            )
+            
+            return image
     
     def gen_img2img(self, strength: float = 0.5, prompt: Optional[str] = None, **kwargs) -> Image.Image:
         """Generate using img2img from the most recent image.
