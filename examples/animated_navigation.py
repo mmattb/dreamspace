@@ -162,7 +162,7 @@ class AnimatedRemoteImgGen:
         
         # New batch introduction with smooth transitions
         self.new_batch_received = False
-        self.new_batch_introduction_duration = 4.0  # Duration for smooth cross-batch transition (increased)
+        self.new_batch_introduction_duration = 2.0  # Duration for smooth cross-batch transition (increased)
         self.batch_introduction_active = False
         self.old_batch_last_frame = None  # Store last frame from previous batch
         self.cross_batch_transition = False  # Flag for cross-batch interpolation
