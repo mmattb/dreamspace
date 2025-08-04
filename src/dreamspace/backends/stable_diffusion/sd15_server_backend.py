@@ -124,6 +124,10 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             device = self.device if hasattr(self, 'device') else 'cuda'
             kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
         
+        # Check if batch generation is requested
+        num_images = kwargs.get('num_images_per_prompt', 1)
+        print(f"🎯 SD15 img2img backend on {self.device}: generating {num_images} variations in parallel with strength={strength}")
+        
         try:
             # Ensure image is in correct format and clean any CUDA references
             if hasattr(image, '_tensor'):
@@ -146,8 +150,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 **kwargs
             )
             
+            # Handle single or multiple images correctly
+            images = result.images
+            print(f"🖼️ Generated {len(images)} img2img variations in parallel on {self.device}")
+            
+            # Always return the full list of images for batch processing
             return {
-                'image': result.images[0],
+                'image': images,  # Return the full list, not just the first image
                 'latents': getattr(result, 'latents', None),
                 'embeddings': self._extract_text_embeddings(prompt)
             }
@@ -176,8 +185,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                     **kwargs
                 )
                 
+                # Handle single or multiple images correctly
+                images = result.images
+                print(f"🖼️ Retry successful: Generated {len(images)} img2img variations on {self.device}")
+                
                 return {
-                    'image': result.images[0],
+                    'image': images,  # Return the full list, not just the first image
                     'latents': getattr(result, 'latents', None),
                     'embeddings': self._extract_text_embeddings(prompt)
                 }

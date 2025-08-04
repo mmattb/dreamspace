@@ -111,6 +111,10 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         if 'generator' not in kwargs and 'seed' in kwargs:
             kwargs['generator'] = torch.Generator().manual_seed(kwargs.pop('seed'))
         
+        # Check if batch generation is requested
+        num_images = kwargs.get('num_images_per_prompt', 1)
+        print(f"🎯 Kandinsky21 img2img backend on {self.device}: generating {num_images} variations in parallel with strength={strength}")
+        
         result = self.img2img_pipe(
             prompt=prompt,
             image=image,
@@ -119,8 +123,13 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             **kwargs
         )
         
+        # Handle single or multiple images correctly
+        images = result.images
+        print(f"🖼️ Generated {len(images)} img2img variations in parallel on {self.device}")
+        
+        # Always return the full list of images for batch processing
         return {
-            'image': result.images[0],
+            'image': images,  # Return the full list, not just the first image
             'latents': getattr(result, 'latents', None),
             'embeddings': self._extract_embeddings(prompt)
         }
