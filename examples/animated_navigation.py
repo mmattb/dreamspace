@@ -38,6 +38,13 @@ import random
 import math
 from collections import deque
 
+MORPHS = [
+        "a cave",
+        "shawdowy figure",
+        "bright summer day",
+        "twisted",
+        "will-o-wisps",
+    ]
 
 class RhythmModulator:
     """Base class for rhythm modulation patterns."""
@@ -65,10 +72,10 @@ class HeartbeatRhythm(RhythmModulator):
             # Brief pause between boom-boom
             interval = self.base_interval * 0.15  
             self.beat_phase = 2
-        elif self.beat_phase == 2:
-            # Second beat - quick transition
-            interval = self.base_interval * 0.15
-            self.beat_phase = 3
+        #elif self.beat_phase == 2:
+        #    # Second beat - quick transition
+        #    interval = self.base_interval * 0.15
+        #    self.beat_phase = 3
         else:
             # Long pause before next heartbeat
             interval = self.base_interval * 1.55
@@ -134,7 +141,7 @@ class WaveRhythm(RhythmModulator):
 class AnimatedRemoteImgGen:
     """Remote image generator with batch animation support and artistic modulation."""
     
-    def __init__(self, server_url: str, initial_prompt: str = "a surreal dreamlike forest, ethereal lighting"):
+    def __init__(self, server_url: str, initial_prompt: str = "a surreal dreamlike forest"):
         self.server_url = server_url.rstrip('/')
         self.prompt = initial_prompt
         self.current_frames = []
@@ -152,6 +159,14 @@ class AnimatedRemoteImgGen:
         self.interpolation_enabled = True
         self.interpolation_steps = 8  # Number of blend steps
         self.current_interpolation_step = 0
+        
+        # New batch introduction with smooth transitions
+        self.new_batch_received = False
+        self.new_batch_introduction_duration = 4.0  # Duration for smooth cross-batch transition (increased)
+        self.batch_introduction_active = False
+        self.old_batch_last_frame = None  # Store last frame from previous batch
+        self.cross_batch_transition = False  # Flag for cross-batch interpolation
+        self.cross_batch_start_time = None  # Track when cross-batch transition started
         
         # Test connection
         try:
@@ -269,17 +284,21 @@ class AnimatedRemoteImgGen:
                 print(f"❌ Request {request_id[:8]} cancelled before frame update")
                 return []
             
-            # Only update if this request is still current
+            # Store the current frame as the last frame from the old batch for smooth transition
+            if self.current_frames and len(self.current_frames) > 0 and self.frame_order and len(self.frame_order) > 0:
+                current_idx = self.frame_order[self.frame_index]
+                self.old_batch_last_frame = self.current_frames[current_idx]
+                print(f"🎭 Stored old batch last frame for smooth transition")
+                
+                # Set up cross-batch transition
+                self.cross_batch_transition = True
+                self.cross_batch_start_time = time.time()
+                print(f"🎬 Starting {self.new_batch_introduction_duration}s cross-batch transition")
+            
+            # Update to new batch
             self.current_frames = frames
             self.frame_index = 0
             self._create_randomized_order()  # Create randomized display order
-            
-            # Reset transition timing
-            self.last_transition_time = time.time()
-            self.current_interpolation_step = 0
-            self.current_frame_cache = None
-            self.next_frame_cache = None
-            self._current_interval = self.rhythm_modulator.next_interval()
             
             elapsed = time.time() - start_time
             print(f"✅ Animation batch [{request_id[:8]}] completed in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per frame)")
@@ -306,7 +325,38 @@ class AnimatedRemoteImgGen:
         
         current_time = time.time()
         
-        # Get the interval for current transition (this should be consistent during the transition)
+        # Handle cross-batch transition FIRST - this takes priority
+        if self.cross_batch_transition and self.old_batch_last_frame is not None and hasattr(self, 'cross_batch_start_time'):
+            # Get the first frame of the new batch
+            new_batch_first_idx = self.frame_order[0]
+            new_batch_first_frame = self.current_frames[new_batch_first_idx]
+            
+            # Calculate interpolation progress for cross-batch transition
+            time_since_cross_batch_start = current_time - self.cross_batch_start_time
+            progress = min(time_since_cross_batch_start / self.new_batch_introduction_duration, 1.0)
+            
+            # Check if cross-batch transition should end
+            if progress >= 1.0:
+                # End cross-batch transition
+                self.cross_batch_transition = False
+                self.batch_introduction_active = False
+                self.new_batch_received = False
+                self.old_batch_last_frame = None
+                self.last_transition_time = current_time  # Reset for normal transitions
+                print(f"🎭 Cross-batch transition completed")
+                return new_batch_first_frame
+            
+            if not self.interpolation_enabled:
+                return new_batch_first_frame
+            
+            # Smooth interpolation curve (ease-in-out) for cross-batch transition
+            smooth_progress = 0.5 - 0.5 * math.cos(progress * math.pi)
+            
+            # Interpolate from old batch last frame to new batch first frame
+            return self._interpolate_frames(self.old_batch_last_frame, new_batch_first_frame, smooth_progress)
+        
+        # Normal frame transitions - only when NOT in cross-batch transition
+        # Get the interval for current transition
         if not hasattr(self, '_current_interval'):
             self._current_interval = self.rhythm_modulator.next_interval()
         
@@ -314,10 +364,9 @@ class AnimatedRemoteImgGen:
         if current_time - self.last_transition_time >= self._current_interval:
             self._advance_to_next_frame()
             self.last_transition_time = current_time
-            # Get new interval for next transition
             self._current_interval = self.rhythm_modulator.next_interval()
         
-        # Get current and next frames
+        # Normal within-batch frame transitions
         current_idx = self.frame_order[self.frame_index]
         next_idx = self.frame_order[(self.frame_index + 1) % len(self.frame_order)]
         
@@ -359,8 +408,8 @@ class AnimatedRemoteImgGen:
         return len(self.current_frames) > 0
 
 
-def show_image(img: Image.Image, window, target_width: int = 768, target_height: int = 768, window_size: int = 768):
-    """Display PIL Image in pygame window, centered if non-square."""
+def show_image(img: Image.Image, window, target_width: int = 768, target_height: int = 768):
+    """Display PIL Image in pygame window."""
     if img is None:
         return
     
@@ -371,22 +420,20 @@ def show_image(img: Image.Image, window, target_width: int = 768, target_height:
     data = img.tobytes()
     py_img = pygame.image.fromstring(data, size, mode)
     
-    # Center the image in the window if it's not square
-    x_offset = (window_size - target_width) // 2
-    y_offset = (window_size - target_height) // 2
-    window.blit(py_img, (x_offset, y_offset))
+    # Since window is now the exact size of the image, no centering needed
+    window.blit(py_img, (0, 0))
 
 
-def draw_ui(window, font, status_text, frame_info, generation_status, window_size=512):
+def draw_ui(window, font, status_text, frame_info, generation_status, window_width=512, window_height=512):
     """Draw UI overlay."""
     # Semi-transparent overlay
-    overlay = pygame.Surface((window_size, 100))
+    overlay = pygame.Surface((window_width, 100))
     overlay.set_alpha(180)
     overlay.fill((0, 0, 0))
-    window.blit(overlay, (0, window_size - 100))
+    window.blit(overlay, (0, window_height - 100))
     
     # Status text
-    y_offset = window_size - 92
+    y_offset = window_height - 92
     for line in status_text:
         text_surface = font.render(line, True, (255, 255, 255))
         window.blit(text_surface, (10, y_offset))
@@ -395,12 +442,12 @@ def draw_ui(window, font, status_text, frame_info, generation_status, window_siz
     # Frame info
     if frame_info:
         frame_surface = font.render(frame_info, True, (0, 255, 0))
-        window.blit(frame_surface, (10, window_size - 22))
+        window.blit(frame_surface, (10, window_height - 22))
     
     # Generation status
     if generation_status:
         gen_surface = font.render(generation_status, True, (255, 255, 0))
-        window.blit(gen_surface, (10, window_size - 42))
+        window.blit(gen_surface, (10, window_height - 42))
 
 
 def main():
@@ -426,11 +473,10 @@ def main():
     
     print(f"🖼️ Using image size: {image_width}x{image_height}")
     
-    # Initialize pygame with the larger dimension for window size
-    window_size = max(image_width, image_height)
+    # Initialize pygame with the actual image dimensions
     pygame.init()
     pygame.font.init()
-    win = pygame.display.set_mode((window_size, window_size))
+    win = pygame.display.set_mode((image_width, image_height))
     pygame.display.set_caption("Dreamspace Navigator - Animated")
     font = pygame.font.Font(None, 20)
     clock = pygame.time.Clock()
@@ -440,7 +486,7 @@ def main():
     try:
         img_gen = AnimatedRemoteImgGen(
             server_url=server_url,
-            initial_prompt="a surreal dreamlike forest, ethereal lighting"
+            initial_prompt="a surreal dreamlike forest"
         )
     except Exception as e:
         print(f"❌ Failed to connect: {e}")
@@ -463,11 +509,7 @@ def main():
     current_prompt = img_gen.prompt
     
     # Effect modifiers
-    effects = [
-        "glowing light", "misty atmosphere", "golden hour lighting",
-        "ethereal glow", "deep shadows", "vibrant colors",
-        "soft focus", "mystical energy", "dreamy blur", "cosmic energy"
-    ]
+    effects = MORPHS
     current_effects = []
     
     print(f"🎬 Generating initial animation batch ({batch_size} frames)...")
@@ -678,7 +720,7 @@ def main():
         win.fill((0, 0, 0))
         current_frame = img_gen.get_current_frame()
         if current_frame:
-            show_image(current_frame, win, image_width, image_height, window_size)
+            show_image(current_frame, win, image_width, image_height)
         
         # Prepare UI text
         rhythm_name = img_gen.rhythm_modulator.__class__.__name__.replace('Rhythm', '')
@@ -689,6 +731,12 @@ def main():
             f"Animation: {'ON' if animation_enabled else 'OFF'} ({animation_speed} FPS)",
             f"Rhythm: {rhythm_name} | Interpolation: {interpolation_status}"
         ]
+        
+        # Add batch introduction indicator
+        if hasattr(img_gen, 'cross_batch_transition') and img_gen.cross_batch_transition:
+            status_lines.append("🎭 CROSS-BATCH TRANSITION")
+        elif hasattr(img_gen, 'batch_introduction_active') and img_gen.batch_introduction_active:
+            status_lines.append("🎭 NEW BATCH SHOWCASE")
         
         frame_info = ""
         if img_gen.has_frames():
@@ -701,7 +749,7 @@ def main():
             generation_status = "🎬 Background generation..."
         
         # Draw UI
-        draw_ui(win, font, status_lines, frame_info, generation_status, window_size)
+        draw_ui(win, font, status_lines, frame_info, generation_status, image_width, image_height)
         
         pygame.display.flip()
         clock.tick(animation_speed if animation_enabled else 30)
@@ -747,11 +795,10 @@ if __name__ == "__main__":
         print(f"🖼️ Using image size: {image_width}x{image_height}")
         print(f"🌐 Server: {server_url}")
         
-        # Initialize pygame with the larger dimension for window size
-        window_size = max(image_width, image_height)
+        # Initialize pygame with the actual image dimensions
         pygame.init()
         pygame.font.init()
-        win = pygame.display.set_mode((window_size, window_size))
+        win = pygame.display.set_mode((image_width, image_height))
         pygame.display.set_caption("Dreamspace Navigator - Animated")
         font = pygame.font.Font(None, 20)
         clock = pygame.time.Clock()
@@ -761,7 +808,7 @@ if __name__ == "__main__":
         try:
             img_gen = AnimatedRemoteImgGen(
                 server_url=server_url,
-                initial_prompt="a surreal dreamlike forest, ethereal lighting"
+                initial_prompt="a surreal dreamlike forest"
             )
         except Exception as e:
             print(f"❌ Failed to connect: {e}")
@@ -783,11 +830,7 @@ if __name__ == "__main__":
         current_prompt = img_gen.prompt
         
         # Effect modifiers
-        effects = [
-            "glowing light", "misty atmosphere", "golden hour lighting",
-            "ethereal glow", "deep shadows", "vibrant colors",
-            "soft focus", "mystical energy", "dreamy blur", "cosmic energy"
-        ]
+        effects = MORPHS
         current_effects = []
         
         print(f"🎬 Generating initial animation batch ({batch_size} frames)...")
@@ -806,7 +849,7 @@ if __name__ == "__main__":
                 win.fill((20, 20, 30))
                 loading_text = f"Generating animation batch... {'.' * (loading_frame % 4)}"
                 text_surface = font.render(loading_text, True, (255, 255, 255))
-                win.blit(text_surface, (10, window_size // 2))
+                win.blit(text_surface, (10, image_height // 2))
                 pygame.display.flip()
                 pygame.time.wait(100)
                 loading_frame += 1
@@ -999,7 +1042,7 @@ if __name__ == "__main__":
             win.fill((0, 0, 0))
             current_frame = img_gen.get_current_frame()
             if current_frame:
-                show_image(current_frame, win, image_width, image_height, window_size)
+                show_image(current_frame, win, image_width, image_height)
             
             # Prepare UI text
             rhythm_name = img_gen.rhythm_modulator.__class__.__name__.replace('Rhythm', '')
@@ -1010,6 +1053,12 @@ if __name__ == "__main__":
                 f"Animation: {'ON' if animation_enabled else 'OFF'} ({animation_speed} FPS)",
                 f"Rhythm: {rhythm_name} | Interpolation: {interpolation_status}"
             ]
+            
+            # Add batch introduction indicator
+            if hasattr(img_gen, 'cross_batch_transition') and img_gen.cross_batch_transition:
+                status_lines.append("🎭 CROSS-BATCH TRANSITION")
+            elif hasattr(img_gen, 'batch_introduction_active') and img_gen.batch_introduction_active:
+                status_lines.append("🎭 NEW BATCH SHOWCASE")
             
             frame_info = ""
             if img_gen.has_frames():
@@ -1022,7 +1071,7 @@ if __name__ == "__main__":
                 generation_status = "🎬 Background generation..."
             
             # Draw UI
-            draw_ui(win, font, status_lines, frame_info, generation_status, window_size)
+            draw_ui(win, font, status_lines, frame_info, generation_status, image_width, image_height)
             
             pygame.display.flip()
             clock.tick(animation_speed if animation_enabled else 30)
