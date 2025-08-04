@@ -90,18 +90,17 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         # Check if batch generation is requested
         num_images = kwargs.get('num_images_per_prompt', 1)
-        print(f"🎯 SD15 server backend on {self.device}: generating {num_images} images from same generator state")
+        print(f"🎯 SD15 server backend on {self.device}: generating {num_images} images in parallel from same generator state")
         
         result = self.pipe(prompt, return_dict=True, **kwargs)
         
-        # Handle single or multiple images
+        # Handle single or multiple images correctly
         images = result.images
-        print(f"🖼️ Generated {len(images)} images on {self.device}")
+        print(f"🖼️ Generated {len(images)} images in parallel on {self.device}")
         
-        return_image = images[0] if num_images == 1 else images
-        
+        # Always return the full list of images for batch processing
         return {
-            'image': return_image,
+            'image': images,  # Return the full list, not just the first image
             'latents': getattr(result, 'latents', None),
             'embeddings': self._extract_text_embeddings(prompt)
         }
