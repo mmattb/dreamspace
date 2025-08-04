@@ -318,10 +318,6 @@ def create_app(backend_type: str = "kandinsky_local",
             image.save(buffer, format='JPEG', quality=90, optimize=True)
             image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
             
-            # Log encoding info
-            buffer_size = len(buffer.getvalue())
-            print(f"📦 Encoded image: {buffer_size/1024:.1f}KB")
-            
             return ImageResponse(
                 image=image_b64,
                 metadata={
@@ -344,22 +340,16 @@ def create_app(backend_type: str = "kandinsky_local",
         import time
         
         try:
-            print(f"🔍 DEBUG: Starting generate_batch endpoint")
-            print(f"🔍 DEBUG: Request data: {request.dict()}")
-            
             img_gen = get_img_gen()
-            print(f"🔍 DEBUG: Got img_gen: {type(img_gen)}")
             
             # Limit batch size for server stability
             batch_size = min(request.batch_size, 32)
-            print(f"🔍 DEBUG: Batch size: {batch_size}")
             
             # Prepare generation parameters
             gen_params = {
                 k: v for k, v in request.dict().items() 
                 if v is not None and k not in ['prompt', 'batch_size']
             }
-            print(f"🔍 DEBUG: Generation parameters: {gen_params}")
             
             print(f"🎬 Generating batch of {batch_size} coherent variations...")
             start_time = time.time()

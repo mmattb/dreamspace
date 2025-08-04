@@ -130,8 +130,6 @@ class AnimatedRemoteImgGen:
                 image_data = base64.b64decode(image_b64)
                 image = Image.open(BytesIO(image_data))
                 frames.append(image)
-                if i % 8 == 0:  # Print every 8th frame to reduce spam
-                    print(f"  Decoded frame {i+1}/{batch_size} [{request_id[:8]}]")
             
             # Final check before updating frames
             if self.cancel_current_request or self.current_request_id != request_id:
