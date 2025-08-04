@@ -100,10 +100,15 @@ async def lifespan(app: FastAPI):
     config = Config()
     backend_type = app_state.get("backend_type", "kandinsky_local")
     gpu_selection = app_state.get("gpu_selection", "auto")
+    disable_safety_checker = app_state.get("disable_safety_checker", False)
     
     try:
         # Prepare backend kwargs with GPU configuration
         backend_kwargs = {}
+        
+        # Add safety checker configuration for SD 1.5
+        if backend_type == "sd15_server" and disable_safety_checker:
+            backend_kwargs["disable_safety_checker"] = True
         
         # Add GPU configuration if specified
         if gpu_selection != "auto":
@@ -591,7 +596,8 @@ def run_server(backend_type: str = "kandinsky_local",
                workers: int = 1,
                enable_auth: bool = False,
                api_key: Optional[str] = None,
-               gpus: Optional[str] = None):
+               gpus: Optional[str] = None,
+               disable_safety_checker: bool = False):
     """Run the image generation server.
     
     Args:
@@ -602,9 +608,11 @@ def run_server(backend_type: str = "kandinsky_local",
         enable_auth: Whether to enable authentication
         api_key: API key for authentication
         gpus: GPU selection - 'auto', '0', '1', '0,1', or specific GPU IDs
+        disable_safety_checker: Disable NSFW safety checker for SD 1.5
     """
-    # Store GPU selection for backend creation
+    # Store configuration for backend creation
     app_state["gpu_selection"] = gpus
+    app_state["disable_safety_checker"] = disable_safety_checker
     
     app = create_app(backend_type, enable_auth, api_key)
     
@@ -641,6 +649,10 @@ if __name__ == "__main__":
     parser.add_argument("--gpu-memory-fraction", type=float, default=0.9,
                        help="Fraction of GPU memory to use (0.1-1.0)")
     
+    # Safety checker arguments
+    parser.add_argument("--disable-safety-checker", action="store_true",
+                       help="Disable NSFW safety checker for SD 1.5 (fixes false positives)")
+    
     args = parser.parse_args()
     
     # Set GPU environment based on selection
@@ -654,6 +666,8 @@ if __name__ == "__main__":
     print(f"🌐 Binding to: {args.host}:{args.port}")
     if args.gpus != "auto":
         print(f"🎮 GPU Configuration: {args.gpus} (memory fraction: {args.gpu_memory_fraction})")
+    if args.disable_safety_checker:
+        print("🚫 NSFW safety checker disabled (fixes false positives)")
     
     run_server(
         backend_type=args.backend,
@@ -662,5 +676,6 @@ if __name__ == "__main__":
         workers=args.workers,
         enable_auth=args.auth,
         api_key=args.api_key,
-        gpus=args.gpus
+        gpus=args.gpus,
+        disable_safety_checker=args.disable_safety_checker
     )

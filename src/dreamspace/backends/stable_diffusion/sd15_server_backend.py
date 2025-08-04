@@ -17,16 +17,19 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     
     def __init__(self, 
                  config: Optional[Config] = None,
-                 device: Optional[str] = None):
+                 device: Optional[str] = None,
+                 disable_safety_checker: bool = False):
         """Initialize the SD 1.5 server backend.
         
         Args:
             config: Configuration instance
             device: Device to run on (overrides config)
+            disable_safety_checker: If True, disables NSFW safety checker (fixes false positives)
         """
         self.config = config or Config()
         self.device = device or "cuda"
         self.model_id = "runwayml/stable-diffusion-v1-5"
+        self.disable_safety_checker = disable_safety_checker
         self._load_pipelines()
     
     def _load_pipelines(self):
@@ -35,10 +38,21 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         print(f"🔮 Loading Stable Diffusion 1.5 from {self.model_id} on {self.device}...")
         
+        # Prepare loading arguments
+        pipeline_kwargs = {
+            "torch_dtype": torch.float16,
+        }
+        
+        # Optionally disable safety checker (fixes false positives)
+        if self.disable_safety_checker:
+            pipeline_kwargs["safety_checker"] = None
+            pipeline_kwargs["requires_safety_checker"] = False
+            print("  🚫 NSFW safety checker disabled (fixes false positives)")
+        
         # Load text-to-image pipeline
         self.pipe = AutoPipelineForText2Image.from_pretrained(
             self.model_id,
-            torch_dtype=torch.float16,
+            **pipeline_kwargs
         )
         
         # Move pipeline to specified device
@@ -56,7 +70,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         # Load image-to-image pipeline
         self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
             self.model_id,
-            torch_dtype=torch.float16,
+            **pipeline_kwargs
         )
         
         # Move pipeline to specified device
