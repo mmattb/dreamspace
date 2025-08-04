@@ -33,6 +33,9 @@ Examples:
   %(prog)s --backend kandinsky21_server --gpus 1 --port 8001
   %(prog)s --backend kandinsky21_server --gpus 0,1 --port 8001
   %(prog)s --backend kandinsky21_server --gpus auto --port 8001
+  
+  # SD 1.5 with safety checker disabled (fixes false positives)
+  %(prog)s --backend sd15_server --disable-safety-checker --port 8001
         """
     )
     
@@ -111,6 +114,13 @@ Examples:
         help="Log level (default: info)"
     )
     
+    # Safety checker arguments
+    parser.add_argument(
+        "--disable-safety-checker", 
+        action="store_true",
+        help="Disable NSFW safety checker for SD 1.5 (fixes false positives)"
+    )
+    
     args = parser.parse_args()
     
     # Validate authentication arguments
@@ -152,6 +162,8 @@ Examples:
     print(f"   Device: {args.device or 'from config'}")
     if args.gpus != "auto":
         print(f"   GPU Configuration: {args.gpus} (memory fraction: {args.gpu_memory_fraction})")
+    if args.disable_safety_checker:
+        print(f"   Safety Checker: disabled (fixes false positives)")
     
     try:
         run_server(
@@ -161,7 +173,8 @@ Examples:
             workers=args.workers,
             enable_auth=args.auth,
             api_key=args.api_key,
-            gpus=args.gpus
+            gpus=args.gpus,
+            disable_safety_checker=args.disable_safety_checker
         )
     except KeyboardInterrupt:
         print("\n🛑 Server stopped by user")

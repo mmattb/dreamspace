@@ -60,6 +60,7 @@ You can run servers for different models:
 - **Model**: `runwayml/stable-diffusion-v1-5`
 - **Best for**: General purpose, wide compatibility
 - **VRAM**: ~4-6GB
+- **Note**: Use `--disable-safety-checker` to fix false positives
 
 ### **Stable Diffusion 2.1**
 - **Backend**: `sd21_server`
@@ -104,12 +105,15 @@ python scripts/start_server.py \
 # Stable Diffusion 1.5
 python scripts/start_server.py --backend sd15_server --port 8001
 
+# Stable Diffusion 1.5 with safety checker disabled (fixes false positives)
+python scripts/start_server.py --backend sd15_server --disable-safety-checker --port 8001
+
 # Stable Diffusion 2.1  
 python scripts/start_server.py --backend sd21_server --port 8002
 
 # Run multiple models on different ports
 python scripts/start_server.py --backend kandinsky21_server --port 8000 &
-python scripts/start_server.py --backend sd15_server --port 8001 &
+python scripts/start_server.py --backend sd15_server --disable-safety-checker --port 8001 &
 python scripts/start_server.py --backend sd21_server --port 8002 &
 ```
 
