@@ -380,27 +380,20 @@ def create_app(backend_type: str = "kandinsky_local",
 
             print(f"🎯 Generating 1 base image + {batch_size-1} img2img variations for tight similarity")
 
-            # Step 1: Generate base image using text2img
+            # Step 1: Generate base latent using text2img
             base_params = gen_params.copy()
-            base_params['num_images_per_prompt'] = 1  # Just one base image
+            base_params['num_images_per_prompt'] = 1  # Just one base latent
 
-            print(f"📸 Generating base image with seed {base_seed}")
-            base_result = img_gen.gen(prompt=request.prompt, **base_params)
+            print(f"📸 Generating base latent with seed {base_seed}")
+            base_latent = img_gen.gen_latent(prompt=request.prompt, **base_params)
 
-            # Handle the base result
-            if isinstance(base_result, dict) and 'image' in base_result:
-                base_images = base_result['image']
-            else:
-                base_images = base_result
+            # Ensure we have a tensor for latent wiggle
+            if not isinstance(base_latent, torch.Tensor):
+                raise TypeError("Base latent must be a tensor for latent wiggle")
 
-            # Ensure we have a list and get the first image
-            if not isinstance(base_images, list):
-                base_images = [base_images]
+            all_latents = [base_latent]  # Start with base latent
 
-            base_image = base_images[0]
-            all_images = [base_image]  # Start with base image
-
-            print(f"✅ Base image generated successfully")
+            print(f"✅ Base latent generated successfully")
 
             # Step 2: Generate variations using latent noise
             if batch_size > 1:
@@ -408,15 +401,14 @@ def create_app(backend_type: str = "kandinsky_local",
                 print(f"🔄 Now generating {variations_needed} latent variations with noise magnitude={request.noise_magnitude}")
 
                 # Create latent variations
-                latents_batch = [base_image]
                 for _ in range(variations_needed):
-                    noise = torch.randn_like(base_image) * request.noise_magnitude
-                    latents_batch.append(base_image + noise)
+                    noise = torch.randn_like(base_latent) * request.noise_magnitude
+                    all_latents.append(base_latent + noise)
 
-                latents_batch = torch.cat(latents_batch, dim=0)
+                all_latents = torch.cat(all_latents, dim=0)
 
                 # Decode to images
-                variation_images = img_gen.backend.vae.decode(latents_batch / 0.18215).sample
+                variation_images = img_gen.backend.vae.decode(all_latents / 0.18215).sample
 
                 # Ensure we have a list
                 if not isinstance(variation_images, list):
