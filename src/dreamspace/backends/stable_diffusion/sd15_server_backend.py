@@ -375,6 +375,14 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             bifurcation_step: Number of steps from the end when to add noise and bifurcate
                             (e.g., 5 means bifurcate 5 steps before completion)
         """
+        import time
+        
+        total_start = time.time()
+        print(f"🔀 Starting bifurcated wiggle: {batch_size} variations, noise={noise_magnitude}, bifurcation={bifurcation_step}")
+        
+        # Setup phase
+        setup_start = time.time()
+        
         # Force all models to eval mode
         self.pipe.unet.eval()
         self.pipe.vae.eval() 
@@ -398,8 +406,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
         # Step 1: Set scheduler timesteps
         self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+        
+        setup_time = time.time() - setup_start
+        print(f"⚙️ Setup completed in {setup_time:.3f}s")
 
         # Step 2: Encode the prompt
+        encode_start = time.time()
+        
         prompt_embeds, negative_prompt_embeds = self.pipe.encode_prompt(
             prompt,
             device=self.pipe.device,
@@ -409,8 +422,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
         # Concatenate negative and positive embeddings for classifier-free guidance
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+        
+        encode_time = time.time() - encode_start
+        print(f"📝 Prompt encoding completed in {encode_time:.3f}s")
 
         # Step 3: Prepare initial noise
+        noise_start = time.time()
+        
         latents = self.pipe.prepare_latents(
             batch_size=1,
             num_channels_latents=self.pipe.unet.config.in_channels,
@@ -420,8 +438,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             device=self.pipe.device,
             generator=generator,
         )
+        
+        noise_time = time.time() - noise_start
+        print(f"🎲 Initial noise preparation completed in {noise_time:.3f}s")
 
         # Step 4: Run shared denoising until bifurcation point
+        denoise_start = time.time()
+        
         timesteps = self.pipe.scheduler.timesteps
         bifurcation_index = len(timesteps) - bifurcation_step
         
@@ -446,7 +469,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             # Clean up intermediate tensors to free GPU memory
             del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
+        denoise_time = time.time() - denoise_start
+        print(f"🧠 Shared denoising ({bifurcation_index} steps) completed in {denoise_time:.3f}s")
+
         # Step 5: Bifurcate - create variations by adding noise
+        bifurcate_start = time.time()
+        
         latents_batch = [latents]
         if batch_size > 1:
             for _ in range(batch_size - 1):
@@ -456,9 +484,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         # Concatenate all latents into a single batch for parallel processing
         latents_batch = torch.cat(latents_batch, dim=0)
         
-        print(f"🎯 Bifurcated into {batch_size} variations, continuing with {bifurcation_step} refinement steps")
-
+        bifurcate_time = time.time() - bifurcate_start
+        print(f"🌀 Bifurcation (noise addition) completed in {bifurcate_time:.3f}s")
+        
         # Step 6: Continue denoising all variations in parallel for remaining steps
+        parallel_denoise_start = time.time()
+        
         remaining_timesteps = timesteps[bifurcation_index:]
         
         # Expand prompt embeddings to match batch size for parallel processing
@@ -483,7 +514,11 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             # Clean up intermediate tensors to free GPU memory
             del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
+        parallel_denoise_time = time.time() - parallel_denoise_start
+        print(f"🔄 Parallel denoising ({bifurcation_step} steps × {batch_size} variations) completed in {parallel_denoise_time:.3f}s")
+
         # Step 7: Decode the batch of latents to images
+        decode_start = time.time()
         # Use direct VAE decode with explicit no_grad
         with torch.no_grad():
             # Ensure no computation graph is built
@@ -503,7 +538,19 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             pil_image = Image.fromarray(image_array)
             pil_images.append(pil_image)
         
-        print(f"🔍 Converted {len(pil_images)} bifurcated tensors to PIL Images")
+        decode_time = time.time() - decode_start
+        print(f"🎨 VAE decoding + PIL conversion completed in {decode_time:.3f}s")
+        
+        total_time = time.time() - total_start
+        print(f"✅ Total bifurcated wiggle generation time: {total_time:.3f}s")
+        print(f"📊 Timing breakdown:")
+        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
+        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
+        print(f"   🎲 Noise prep: {noise_time:.3f}s ({noise_time/total_time*100:.1f}%)")
+        print(f"   🧠 Shared denoise: {denoise_time:.3f}s ({denoise_time/total_time*100:.1f}%)")
+        print(f"   🌀 Bifurcation: {bifurcate_time:.3f}s ({bifurcate_time/total_time*100:.1f}%)")
+        print(f"   🔄 Parallel denoise: {parallel_denoise_time:.3f}s ({parallel_denoise_time/total_time*100:.1f}%)")
+        print(f"   🎨 Decoding: {decode_time:.3f}s ({decode_time/total_time*100:.1f}%)")
 
         return {
             'images': pil_images,  # Return PIL Images instead of tensors
