@@ -321,9 +321,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 
-            if i >= 2:  # Stop after a few steps for debugging
-                print(f"🛑 Stopping early for memory debugging")
-                break
+            #if i >= 2:  # Stop after a few steps for debugging
+            #    print(f"🛑 Stopping early for memory debugging")
+            #    break
 
         # Step 5: Create additional latents by adding noise (wiggle)
         latents_batch = [latents]
@@ -364,9 +364,24 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             images = self.pipe.vae.decode(latents_batch / 0.18215).sample
         
         print(f"🔍 GPU memory after decode: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+        
+        # Convert tensor images to PIL Images (like auto pipeline does)
+        # The tensor is in range [-1, 1], need to convert to [0, 1] then to PIL
+        images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+        images = images.cpu().permute(0, 2, 3, 1).float().numpy()  # BCHW -> BHWC and to numpy
+        
+        # Convert to PIL Images
+        from PIL import Image
+        pil_images = []
+        for i in range(images.shape[0]):
+            image_array = (images[i] * 255).astype('uint8')  # Convert to 0-255 range
+            pil_image = Image.fromarray(image_array)
+            pil_images.append(pil_image)
+        
+        print(f"🔍 Converted {len(pil_images)} tensors to PIL Images")
 
         return {
-            'images': images,
+            'images': pil_images,  # Return PIL Images instead of tensors
             'latents': latents_batch,
             'embeddings': self._extract_text_embeddings(prompt)
         }
