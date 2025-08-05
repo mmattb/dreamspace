@@ -80,6 +80,17 @@ Examples:
         help="Use interactive prompts for configuration"
     )
     
+    # Latent wiggle settings
+    parser.add_argument(
+        "--latent-wiggle", action="store_true",
+        help="Enable latent wiggle pipeline (skips img2img pipeline)"
+    )
+
+    parser.add_argument(
+        "--noise-magnitude", type=float, default=0.05,
+        help="Magnitude of noise for latent wiggle variations (default: 0.05)"
+    )
+    
     return parser.parse_args()
 
 
