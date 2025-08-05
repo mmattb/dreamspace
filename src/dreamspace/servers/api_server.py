@@ -307,7 +307,7 @@ def create_app(backend_type: str = "kandinsky_local",
             if batch_size > 1:
                 # For batch generation, return first image but could extend this
                 images = []
-                base_seed = request.seed
+                base_seed = request.seed or 42  # Default seed if not provided
                 for i in range(batch_size):
                     if base_seed is not None:
                         gen_params['seed'] = base_seed + i
@@ -358,71 +358,21 @@ def create_app(backend_type: str = "kandinsky_local",
                 if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude']
             }
 
-            print(f"🎬 Generating batch of {batch_size} coherent variations...")
+            # Delegate batch generation with latent wiggle to the backend
+            print(f"🎬 Generating batch of {batch_size} images with latent wiggle...")
             start_time = time.time()
 
-            # Use the backend's native batch generation with num_images_per_prompt
-            all_images = []
-            base_seed = request.seed or 42
+            # Call the backend method
+            result = img_gen.backend.generate_batch_with_latent_wiggle(
+                prompt=request.prompt,
+                batch_size=batch_size,
+                noise_magnitude=request.noise_magnitude,
+                **gen_params
+            )
 
-            print(f"  🎲 Using base seed: {base_seed} for parallel batch generation")
+            all_images = result['images']
 
-            # Generate all images in parallel using num_images_per_prompt
-            batch_params = {**gen_params}
-            batch_params['seed'] = base_seed
-            batch_params['num_images_per_prompt'] = batch_size
-
-            print(f"  � Generating {batch_size} images in parallel from same generator state...")
-
-            # For batch generation with tight similarity, we use img2img approach:
-            # 1. Generate one base image with text2img 
-            # 2. Use img2img with very low strength to create similar variations
-
-            print(f"🎯 Generating 1 base image + {batch_size-1} img2img variations for tight similarity")
-
-            # Step 1: Generate base latent using text2img
-            base_params = gen_params.copy()
-            base_params['num_images_per_prompt'] = 1  # Just one base latent
-
-            print(f"📸 Generating base latent with seed {base_seed}")
-            base_result = img_gen.backend.generate(prompt=request.prompt, **base_params)
-            print("xxx", dir(base_result))
-            print("xxx2", base_result.keys())
-            print("xxx3", type(base_result['latents']))
-            print("xxx4", base_result['latents'])
-            base_latent = base_result.get('latents')
-
-            # Ensure we have a tensor for latent wiggle
-            if not isinstance(base_latent, torch.Tensor):
-                raise TypeError("Base latent must be a tensor for latent wiggle")
-
-            all_latents = [base_latent]  # Start with base latent
-
-            print(f"✅ Base latent generated successfully")
-
-            # Step 2: Generate variations using latent noise
-            if batch_size > 1:
-                variations_needed = batch_size - 1
-                print(f"🔄 Now generating {variations_needed} latent variations with noise magnitude={request.noise_magnitude}")
-
-                # Create latent variations
-                for _ in range(variations_needed):
-                    noise = torch.randn_like(base_latent) * request.noise_magnitude
-                    all_latents.append(base_latent + noise)
-
-                all_latents = torch.cat(all_latents, dim=0)
-
-                # Decode to images
-                variation_images = img_gen.backend.vae.decode(all_latents / 0.18215).sample
-
-                # Ensure we have a list
-                if not isinstance(variation_images, list):
-                    variation_images = [variation_images]
-
-                all_images.extend(variation_images)
-                print(f"✅ Generated {len(variation_images)} latent variations")
-
-            print(f"✅ Total: {len(all_images)} images generated using latent noise approach")
+            print(f"✅ Batch generation complete: {len(all_images)} images")
 
             # Convert all images to base64 using JPEG for much smaller file sizes
             print("📦 Encoding images to JPEG...")
@@ -442,7 +392,6 @@ def create_app(backend_type: str = "kandinsky_local",
             # Use ThreadPoolExecutor for parallel encoding if we have many images
             if len(all_images) > 8:
                 from concurrent.futures import ThreadPoolExecutor
-                import threading
 
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     results = list(executor.map(encode_single_image, enumerate(all_images)))
@@ -473,16 +422,7 @@ def create_app(backend_type: str = "kandinsky_local",
             elapsed = time.time() - start_time
             avg_time = elapsed / len(all_images) if all_images else 0
 
-            # Determine generation method
-            if batch_size == 1:
-                method = "single_text2img"
-            else:
-                method = "latent_noise_variations"
-
-            print(f"✅ {method.replace('_', ' ').title()} complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
-
-            # Create list of seeds that were used for debugging
-            seeds_used = [base_seed] * len(all_images)  # All images use the same seed
+            print(f"✅ Latent Wiggle Batch complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
 
             return BatchImageResponse(
                 images=image_b64_list,
@@ -492,12 +432,11 @@ def create_app(backend_type: str = "kandinsky_local",
                     "batch_size": len(image_b64_list),
                     "animation_ready": True,
                     "generation_time": elapsed,
-                    "generation_method": method,
+                    "generation_method": "latent_wiggle",
                     "multi_gpu": False,  # Using single GPU with batch generation
                     "gpu_count": 1,
                     "seed": request.seed,
                     "base_seed": base_seed,
-                    "seeds_used": seeds_used,
                     "variation_method": "latent_noise",
                     "noise_magnitude": request.noise_magnitude
                 }
