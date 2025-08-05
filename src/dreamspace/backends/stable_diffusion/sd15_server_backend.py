@@ -294,6 +294,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
         # Step 4: Run the diffusion loop manually
         for i, t in enumerate(self.pipe.scheduler.timesteps):
+            print("xxxx", i)
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
