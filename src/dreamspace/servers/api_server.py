@@ -45,6 +45,7 @@ class GenerateBatchRequest(BaseModel):
     height: Optional[int] = Field(768, description="Image height")
     seed: Optional[int] = Field(None, description="Base seed for variations")
     noise_magnitude: Optional[float] = Field(0.05, description="Magnitude of noise for latent variations")
+    bifurcation_step: Optional[int] = Field(5, description="Number of steps from end to bifurcate in bifurcated wiggle")
 
 
 class BatchImageResponse(BaseModel):
@@ -355,7 +356,7 @@ def create_app(backend_type: str = "kandinsky_local",
             # Prepare generation parameters
             gen_params = {
                 k: v for k, v in request.dict().items() 
-                if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude']
+                if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude', 'bifurcation_step']
             }
 
             # Delegate batch generation with latent wiggle to the backend
@@ -363,13 +364,29 @@ def create_app(backend_type: str = "kandinsky_local",
             start_time = time.time()
             base_seed = request.seed or 42  # Default seed if not provided
 
-            # Call the backend method
-            result = img_gen.backend.generate_batch_with_latent_wiggle(
-                prompt=request.prompt,
-                batch_size=batch_size,
-                noise_magnitude=request.noise_magnitude,
-                **gen_params
-            )
+            # Choose between original and bifurcated wiggle methods
+            # If bifurcation_step is 0, use original method; otherwise use bifurcated
+            use_bifurcated = request.bifurcation_step != 0
+            
+            if use_bifurcated:
+                print(f"🔀 Using bifurcated wiggle with {request.bifurcation_step} refinement steps")
+                # Call the bifurcated wiggle method
+                result = img_gen.backend.generate_batch_with_bifurcated_wiggle(
+                    prompt=request.prompt,
+                    batch_size=batch_size,
+                    noise_magnitude=request.noise_magnitude,
+                    bifurcation_step=request.bifurcation_step,
+                    **gen_params
+                )
+            else:
+                print("🎯 Using original latent wiggle method")
+                # Call the original wiggle method
+                result = img_gen.backend.generate_batch_with_latent_wiggle(
+                    prompt=request.prompt,
+                    batch_size=batch_size,
+                    noise_magnitude=request.noise_magnitude,
+                    **gen_params
+                )
 
             all_images = result['images']
 
@@ -433,13 +450,14 @@ def create_app(backend_type: str = "kandinsky_local",
                     "batch_size": len(image_b64_list),
                     "animation_ready": True,
                     "generation_time": elapsed,
-                    "generation_method": "latent_wiggle",
+                    "generation_method": "bifurcated_wiggle" if use_bifurcated else "latent_wiggle",
                     "multi_gpu": False,  # Using single GPU with batch generation
                     "gpu_count": 1,
                     "seed": request.seed,
                     "base_seed": base_seed,
                     "variation_method": "latent_noise",
-                    "noise_magnitude": request.noise_magnitude
+                    "noise_magnitude": request.noise_magnitude,
+                    "bifurcation_step": request.bifurcation_step if use_bifurcated else None
                 }
             )
 

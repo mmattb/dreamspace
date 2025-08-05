@@ -362,6 +362,155 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             'embeddings': self._extract_text_embeddings(prompt)
         }
     
+    def generate_batch_with_bifurcated_wiggle(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, **kwargs) -> Dict[str, Any]:
+        """Generate a batch of images with bifurcated latent wiggle variations.
+        
+        This approach runs shared denoising until bifurcation_step, then adds noise
+        and continues denoising in parallel to ensure all variations stay on the manifold.
+        
+        Args:
+            prompt: Text prompt for generation
+            batch_size: Number of variations to generate
+            noise_magnitude: Magnitude of noise to add at bifurcation point
+            bifurcation_step: Number of steps from the end when to add noise and bifurcate
+                            (e.g., 5 means bifurcate 5 steps before completion)
+        """
+        # Force all models to eval mode
+        self.pipe.unet.eval()
+        self.pipe.vae.eval() 
+        self.pipe.text_encoder.eval()
+        
+        if hasattr(self.pipe.vae, 'enable_slicing'):
+            self.pipe.vae.enable_slicing()
+
+        # Set default generator for reproducibility on the correct device
+        if 'generator' not in kwargs and 'seed' in kwargs:
+            seed = kwargs.pop('seed')
+            # Create generator on the same device as the pipeline
+            device = self.device if hasattr(self, 'device') else 'cuda'
+            kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
+
+        generator = kwargs['generator']
+        guidance_scale = kwargs.get('guidance_scale', 7.5)
+        height = kwargs.get('height', 512)
+        width = kwargs.get('width', 512)
+        num_inference_steps = kwargs.get('num_inference_steps', 50)
+
+        # Step 1: Set scheduler timesteps
+        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+
+        # Step 2: Encode the prompt
+        prompt_embeds, negative_prompt_embeds = self.pipe.encode_prompt(
+            prompt,
+            device=self.pipe.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=True
+        )
+
+        # Concatenate negative and positive embeddings for classifier-free guidance
+        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+
+        # Step 3: Prepare initial noise
+        latents = self.pipe.prepare_latents(
+            batch_size=1,
+            num_channels_latents=self.pipe.unet.config.in_channels,
+            height=height,
+            width=width,
+            dtype=self.pipe.unet.dtype,
+            device=self.pipe.device,
+            generator=generator,
+        )
+
+        # Step 4: Run shared denoising until bifurcation point
+        timesteps = self.pipe.scheduler.timesteps
+        bifurcation_index = len(timesteps) - bifurcation_step
+        
+        print(f"🔀 Running shared denoising for {bifurcation_index} steps, then bifurcating for final {bifurcation_step} steps")
+        
+        # Shared denoising phase
+        for i, t in enumerate(timesteps[:bifurcation_index]):
+            latent_input = torch.cat([latents] * 2)
+            latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
+
+            # Use torch.no_grad() to prevent gradient accumulation
+            with torch.no_grad():
+                noise_pred = self.pipe.unet(
+                    latent_input, t, encoder_hidden_states=prompt_embeds
+                ).sample
+
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
+            
+            # Clean up intermediate tensors to free GPU memory
+            del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
+
+        # Step 5: Bifurcate - create variations by adding noise
+        latents_batch = [latents]
+        if batch_size > 1:
+            for _ in range(batch_size - 1):
+                noise = torch.randn_like(latents) * noise_magnitude
+                latents_batch.append(latents + noise)
+
+        # Concatenate all latents into a single batch for parallel processing
+        latents_batch = torch.cat(latents_batch, dim=0)
+        
+        print(f"🎯 Bifurcated into {batch_size} variations, continuing with {bifurcation_step} refinement steps")
+
+        # Step 6: Continue denoising all variations in parallel for remaining steps
+        remaining_timesteps = timesteps[bifurcation_index:]
+        
+        # Expand prompt embeddings to match batch size for parallel processing
+        batch_prompt_embeds = prompt_embeds.repeat(batch_size, 1, 1)
+        
+        for i, t in enumerate(remaining_timesteps):
+            # Process entire batch at once
+            latent_input = torch.cat([latents_batch] * 2)
+            latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
+
+            # Use torch.no_grad() to prevent gradient accumulation
+            with torch.no_grad():
+                noise_pred = self.pipe.unet(
+                    latent_input, t, encoder_hidden_states=batch_prompt_embeds
+                ).sample
+
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            latents_batch = self.pipe.scheduler.step(noise_pred, t, latents_batch).prev_sample
+            
+            # Clean up intermediate tensors to free GPU memory
+            del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
+
+        # Step 7: Decode the batch of latents to images
+        # Use direct VAE decode with explicit no_grad
+        with torch.no_grad():
+            # Ensure no computation graph is built
+            latents_batch.requires_grad_(False)
+            images = self.pipe.vae.decode(latents_batch / 0.18215).sample
+        
+        # Convert tensor images to PIL Images (like auto pipeline does)
+        # The tensor is in range [-1, 1], need to convert to [0, 1] then to PIL
+        images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+        images = images.cpu().permute(0, 2, 3, 1).float().numpy()  # BCHW -> BHWC and to numpy
+        
+        # Convert to PIL Images
+        from PIL import Image
+        pil_images = []
+        for i in range(images.shape[0]):
+            image_array = (images[i] * 255).astype('uint8')  # Convert to 0-255 range
+            pil_image = Image.fromarray(image_array)
+            pil_images.append(pil_image)
+        
+        print(f"🔍 Converted {len(pil_images)} bifurcated tensors to PIL Images")
+
+        return {
+            'images': pil_images,  # Return PIL Images instead of tensors
+            'latents': latents_batch,
+            'embeddings': self._extract_text_embeddings(prompt)
+        }
+    
     def interpolate_embeddings(self, embedding1: Any, embedding2: Any, alpha: float) -> Any:
         """Interpolate between two text embeddings."""
         if embedding1 is None or embedding2 is None:
