@@ -293,15 +293,21 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         )
 
         # Step 4: Run the diffusion loop manually
+        print(f"🔍 Initial GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+        print(f"🔍 Latents shape: {latents.shape}, size: {latents.numel() * latents.element_size() / 1024**2:.2f}MB")
+        print(f"🔍 Prompt embeds shape: {prompt_embeds.shape}, size: {prompt_embeds.numel() * prompt_embeds.element_size() / 1024**2:.2f}MB")
+        
         for i, t in enumerate(self.pipe.scheduler.timesteps):
-            print("xxxx", i)
+            print(f"xxxx Step {i}, GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-            print("yyyy", latent_input.shape)
+            print(f"yyyy latent_input shape: {latent_input.shape}, size: {latent_input.numel() * latent_input.element_size() / 1024**2:.2f}MB")
 
-            noise_pred = self.pipe.unet(
-                latent_input, t, encoder_hidden_states=prompt_embeds
-            ).sample
+            # Use torch.no_grad() to prevent gradient accumulation
+            with torch.no_grad():
+                noise_pred = self.pipe.unet(
+                    latent_input, t, encoder_hidden_states=prompt_embeds
+                ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -311,9 +317,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             # Clean up intermediate tensors to free GPU memory
             del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
             
-            # Periodic GPU cache cleanup (every 10 steps)
-            if i % 10 == 0 and torch.cuda.is_available():
+            # More aggressive cleanup every step for debugging
+            if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                
+            if i >= 2:  # Stop after a few steps for debugging
+                print(f"🛑 Stopping early for memory debugging")
+                break
 
         # Step 5: Create additional latents by adding noise (wiggle)
         latents_batch = [latents]
