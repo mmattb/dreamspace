@@ -265,19 +265,23 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         guidance_scale = kwargs.get('guidance_scale', 7.5)
         height = kwargs.get('height', 512)
         width = kwargs.get('width', 512)
+        num_inference_steps = kwargs.get('num_inference_steps', 50)
 
-        # Step 1: Encode the prompt
-        prompt_embeds = self.pipe._encode_prompt(
+        # Step 1: Set scheduler timesteps
+        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+
+        # Step 2: Encode the prompt
+        prompt_embeds, negative_prompt_embeds = self.pipe.encode_prompt(
             prompt,
             device=self.pipe.device,
             num_images_per_prompt=1,
             do_classifier_free_guidance=True
         )
 
-        # Step 2: Prepare initial noise
+        # Step 3: Prepare initial noise
         latents = self.pipe.prepare_latents(
             batch_size=1,
-            num_channels_latents=self.pipe.unet.in_channels,
+            num_channels_latents=self.pipe.unet.config.in_channels,
             height=height,
             width=width,
             dtype=self.pipe.unet.dtype,
@@ -285,7 +289,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             generator=generator,
         )
 
-        # Step 3: Run the diffusion loop manually
+        # Step 4: Run the diffusion loop manually
         for t in self.pipe.scheduler.timesteps:
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
@@ -299,7 +303,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
             latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
 
-        # Step 4: Create additional latents by adding noise (wiggle)
+        # Step 5: Create additional latents by adding noise (wiggle)
         latents_batch = [latents]
         if batch_size > 1:
             for _ in range(batch_size - 1):
@@ -309,7 +313,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         # Concatenate all latents into a single batch
         latents_batch = torch.cat(latents_batch, dim=0)
 
-        # Step 5: Decode the batch of latents to images
+        # Step 6: Decode the batch of latents to images
         images = self.pipe.vae.decode(latents_batch / 0.18215).sample
 
         return {
