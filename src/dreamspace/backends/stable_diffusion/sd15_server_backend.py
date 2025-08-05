@@ -332,11 +332,14 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 noise = torch.randn_like(latents) * noise_magnitude
                 latents_batch.append(latents + noise)
 
+        print(f"🔍 GPU memory after latents: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
         # Concatenate all latents into a single batch
         latents_batch = torch.cat(latents_batch, dim=0)
+        print(f"🔍 GPU memory after cat: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
 
         # Step 6: Decode the batch of latents to images
         images = self.pipe.vae.decode(latents_batch / 0.18215).sample
+        print(f"🔍 GPU memory after decode: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
 
         return {
             'images': images,
