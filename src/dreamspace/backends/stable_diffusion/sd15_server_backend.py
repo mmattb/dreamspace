@@ -113,6 +113,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         print(f"🖼️ Generated {len(images)} images in parallel on {self.device}")
         
         # Debugging: Log the latents returned by the pipeline
+        print("yyyyy", dir(result))
         latents = getattr(result, 'latents', None)
         if latents is not None:
             print(f"🔍 Latents type: {type(latents)}, Latents shape: {getattr(latents, 'shape', 'N/A')}")
