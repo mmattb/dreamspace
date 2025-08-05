@@ -114,6 +114,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         # Debugging: Log the latents returned by the pipeline
         print("yyyyy", dir(result))
+        print("yyyyy2", result.keys())
         latents = getattr(result, 'latents', None)
         if latents is not None:
             print(f"🔍 Latents type: {type(latents)}, Latents shape: {getattr(latents, 'shape', 'N/A')}")
