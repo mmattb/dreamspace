@@ -278,6 +278,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             do_classifier_free_guidance=True
         )
 
+        # Concatenate negative and positive embeddings for classifier-free guidance
+        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+
         # Step 3: Prepare initial noise
         latents = self.pipe.prepare_latents(
             batch_size=1,
