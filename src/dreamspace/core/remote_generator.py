@@ -7,7 +7,10 @@ batches of animation frames, and provides smooth cross-batch transitions.
 import time
 import random
 import base64
+import pickle
+import gzip
 import requests
+import numpy as np
 from io import BytesIO
 from PIL import Image
 from typing import List, Optional, Dict, Any
@@ -82,7 +85,8 @@ class AnimatedRemoteImgGen:
             "guidance_scale": kwargs.get("guidance_scale", 7.5),
             "seed": kwargs.get("seed", 42),
             "noise_magnitude": kwargs.get("noise_magnitude", 0.3),
-            "bifurcation_step": kwargs.get("bifurcation_step", 3)
+            "bifurcation_step": kwargs.get("bifurcation_step", 3),
+            "output_format": kwargs.get("output_format", "jpeg")
         }
         
         print(f"🎬 Generating {batch_size} frame animation [{request_id[:8]}]: '{use_prompt[:50]}...'")
@@ -121,16 +125,34 @@ class AnimatedRemoteImgGen:
                 chunk_info = metadata.get("chunk_sizes", [])
                 print(f"  📊 Server used {metadata['chunks']} chunks: {chunk_info}")
             
-            # Convert all base64 images to PIL Images
+            # Get output format from request data or metadata
+            output_format = request_data.get("output_format", "jpeg")
+            server_format = metadata.get("output_format", output_format)
+            
+            # Convert all images to PIL Images (handle different formats)
             frames = []
-            for i, image_b64 in enumerate(result["images"]):
+            for i, image_data in enumerate(result["images"]):
                 # Check for cancellation during decoding
                 if self.cancel_current_request or self.current_request_id != request_id:
                     print(f"❌ Request {request_id[:8]} cancelled during decoding at frame {i+1}")
                     return []
                 
-                image_data = base64.b64decode(image_b64)
-                image = Image.open(BytesIO(image_data))
+                if server_format == "tensor":
+                    # Deserialize tensor data
+                    tensor_bytes = base64.b64decode(image_data)
+                    tensor_array = pickle.loads(gzip.decompress(tensor_bytes))
+                    
+                    # Convert tensor to PIL Image
+                    # Tensor should be in format (H, W, C) with values 0-255
+                    if tensor_array.dtype != np.uint8:
+                        tensor_array = (tensor_array * 255).astype(np.uint8)
+                    
+                    image = Image.fromarray(tensor_array, mode='RGB')
+                else:
+                    # Handle as base64-encoded image (jpeg, png, etc.)
+                    image_bytes = base64.b64decode(image_data)
+                    image = Image.open(BytesIO(image_bytes))
+                
                 frames.append(image)
             
             # Final check before updating frames

@@ -362,7 +362,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             'embeddings': self._extract_text_embeddings(prompt)
         }
     
-    def generate_batch_with_bifurcated_wiggle(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, **kwargs) -> Dict[str, Any]:
+    def generate_batch_with_bifurcated_wiggle(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, output_format: str = "pil", **kwargs) -> Dict[str, Any]:
         """Generate a batch of images with bifurcated latent wiggle variations.
         
         This approach runs shared denoising until bifurcation_step, then adds noise
@@ -519,25 +519,40 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
         # Step 7: Decode the batch of latents to images
         decode_start = time.time()
+        
         # Use direct VAE decode with explicit no_grad
+        vae_start = time.time()
         with torch.no_grad():
             # Ensure no computation graph is built
             latents_batch.requires_grad_(False)
             images = self.pipe.vae.decode(latents_batch / 0.18215).sample
+        vae_time = time.time() - vae_start
+        print(f"🔮 VAE decode completed in {vae_time:.3f}s")
         
         # Convert tensor images to PIL Images (like auto pipeline does)
         # The tensor is in range [-1, 1], need to convert to [0, 1] then to PIL
+        tensor_convert_start = time.time()
         images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
         images = images.cpu().permute(0, 2, 3, 1).float().numpy()  # BCHW -> BHWC and to numpy
+        tensor_convert_time = time.time() - tensor_convert_start
+        print(f"🔄 Tensor→numpy conversion completed in {tensor_convert_time:.3f}s")
         
         # Convert to PIL Images
+        pil_start = time.time()
+        from PIL import Image
         pil_images = []
         for i in range(images.shape[0]):
             image_array = (images[i] * 255).astype('uint8')  # Convert to 0-255 range
             pil_image = Image.fromarray(image_array)
             pil_images.append(pil_image)
+        pil_time = time.time() - pil_start
+        print(f"🖼️ Numpy→PIL conversion completed in {pil_time:.3f}s")
         
         decode_time = time.time() - decode_start
+        print(f"🎨 Total VAE decoding + PIL conversion completed in {decode_time:.3f}s")
+        print(f"   🔮 VAE decode: {vae_time:.3f}s ({vae_time/decode_time*100:.1f}%)")
+        print(f"   🔄 Tensor→numpy: {tensor_convert_time:.3f}s ({tensor_convert_time/decode_time*100:.1f}%)")
+        print(f"   🖼️ Numpy→PIL: {pil_time:.3f}s ({pil_time/decode_time*100:.1f}%)")
         print(f"🎨 VAE decoding + PIL conversion completed in {decode_time:.3f}s")
         
         total_time = time.time() - total_start
@@ -548,14 +563,36 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         print(f"   🎲 Noise prep: {noise_time:.3f}s ({noise_time/total_time*100:.1f}%)")
         print(f"   🧠 Shared denoise: {denoise_time:.3f}s ({denoise_time/total_time*100:.1f}%)")
         print(f"   🌀 Bifurcation: {bifurcate_time:.3f}s ({bifurcate_time/total_time*100:.1f}%)")
-        print(f"   🔄 Parallel denoise: {parallel_denoise_time:.3f}s ({parallel_denoise_time/total_time*100:.1f}%)")
+        print(f"   🔄 Parallel denoise: {parallel_denoise_time:.3f}s ({parallel_denoise_time/decode_time*100:.1f}%)")
         print(f"   🎨 Decoding: {decode_time:.3f}s ({decode_time/total_time*100:.1f}%)")
 
-        return {
-            'images': pil_images,  # Return PIL Images instead of tensors
-            'latents': latents_batch,
-            'embeddings': self._extract_text_embeddings(prompt)
-        }
+        # Return based on requested output format
+        if output_format == "tensor":
+            # Return raw numpy arrays for ultra-fast local processing
+            print(f"🚀 Returning raw tensors (numpy format) for high-speed local processing")
+            return {
+                'images': images,  # Raw numpy arrays [0,1] range, shape (batch, height, width, 3)
+                'format': 'numpy_float32',
+                'shape': images.shape,
+                'latents': latents_batch,
+                'embeddings': self._extract_text_embeddings(prompt)
+            }
+        elif output_format == "pil":
+            # Original PIL format (default for backwards compatibility)
+            return {
+                'images': pil_images,  # PIL Images
+                'format': 'pil',
+                'latents': latents_batch,
+                'embeddings': self._extract_text_embeddings(prompt)
+            }
+        else:
+            # Default to PIL for now, could add other formats later
+            return {
+                'images': pil_images,  # PIL Images
+                'format': 'pil', 
+                'latents': latents_batch,
+                'embeddings': self._extract_text_embeddings(prompt)
+            }
     
     def interpolate_embeddings(self, embedding1: Any, embedding2: Any, alpha: float) -> Any:
         """Interpolate between two text embeddings."""
