@@ -92,13 +92,13 @@ Examples:
     )
 
     parser.add_argument(
-        "--noise-magnitude", type=float, default=0.05,
-        help="Magnitude of noise for latent wiggle variations (default: 0.05)"
+        "--noise-magnitude", type=float, default=0.3,
+        help="Magnitude of noise for latent wiggle variations (default: 0.3)"
     )
 
     parser.add_argument(
-        "--bifurcation-step", type=int, default=5,
-        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 5, set to 0 for original wiggle)"
+        "--bifurcation-step", type=int, default=3,
+        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3, set to 0 for original wiggle)"
     )
     
     # Speed test specific options
@@ -118,7 +118,7 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.05, bifurcation_step: int = 5):
+    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.3, bifurcation_step: int = 3):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
@@ -283,7 +283,7 @@ def main():
     # Handle bifurcated wiggle flag
     bifurcation_step = args.bifurcation_step
     if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
-        bifurcation_step = max(bifurcation_step, 5)  # Ensure minimum of 5
+        bifurcation_step = max(bifurcation_step, 3)  # Ensure minimum of 3
 
     # Create speed tester
     tester = SpeedTester(

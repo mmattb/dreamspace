@@ -92,13 +92,13 @@ Examples:
     )
 
     parser.add_argument(
-        "--noise-magnitude", type=float, default=0.05,
-        help="Magnitude of noise for latent wiggle variations (default: 0.05)"
+        "--noise-magnitude", type=float, default=0.3,
+        help="Magnitude of noise for latent wiggle variations (default: 0.3)"
     )
 
     parser.add_argument(
-        "--bifurcation-step", type=int, default=5,
-        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 5, set to 0 for original wiggle)"
+        "--bifurcation-step", type=int, default=3,
+        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3, set to 0 for original wiggle)"
     )
     
     return parser.parse_args()

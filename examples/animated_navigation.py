@@ -431,7 +431,7 @@ def main_with_args():
     
     # If bifurcated-wiggle flag is used, ensure bifurcation_step is set
     if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
-        navigator.bifurcation_step = max(navigator.bifurcation_step, 5)  # Ensure minimum of 5
+        navigator.bifurcation_step = max(navigator.bifurcation_step, 3)  # Ensure minimum of 3
         navigator.latent_wiggle = True  # Imply latent wiggle is enabled
     
     # Add noise_magnitude and bifurcation_step to generation parameters

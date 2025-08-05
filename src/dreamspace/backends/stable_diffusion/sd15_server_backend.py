@@ -531,7 +531,6 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         images = images.cpu().permute(0, 2, 3, 1).float().numpy()  # BCHW -> BHWC and to numpy
         
         # Convert to PIL Images
-        from PIL import Image
         pil_images = []
         for i in range(images.shape[0]):
             image_array = (images[i] * 255).astype('uint8')  # Convert to 0-255 range
