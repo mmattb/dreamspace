@@ -361,6 +361,7 @@ def create_app(backend_type: str = "kandinsky_local",
             # Delegate batch generation with latent wiggle to the backend
             print(f"🎬 Generating batch of {batch_size} images with latent wiggle...")
             start_time = time.time()
+            base_seed = request.seed or 42  # Default seed if not provided
 
             # Call the backend method
             result = img_gen.backend.generate_batch_with_latent_wiggle(
