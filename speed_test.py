@@ -24,6 +24,8 @@ from typing import Tuple
 from dreamspace.core.remote_generator import AnimatedRemoteImgGen
 from dreamspace.cli.navigation import parse_arguments, get_image_dimensions
 
+DEFAULT_IP = "172.28.5.21"
+
 
 def create_speed_test_parser():
     """Create argument parser with speed test specific options."""
@@ -45,8 +47,8 @@ Examples:
     
     # Server configuration
     parser.add_argument(
-        "--server", type=str, default="http://localhost:8000",
-        help="Server URL (default: http://localhost:8000)"
+        "--server", type=str, default=f"http://{DEFAULT_IP}:8001",
+        help=f"Server URL (default: http://{DEFAULT_IP}:8001)"
     )
     
     # Image dimensions
@@ -70,7 +72,7 @@ Examples:
     )
     
     parser.add_argument(
-        "--prompt", type=str, default="birch forest in our ancestral lands",
+        "--prompt", type=str, default="steampunk forest with glass and brass",
         help="Initial prompt for image generation"
     )
     
