@@ -46,18 +46,9 @@ from dreamspace.cli.navigation import (
 )
 
 MORPHS = [
-    "ethereal glow",
-    "fractal patterns", 
-    "iridescent shimmer",
-    "cosmic dust",
-    "flowing energy",
-    "prismatic light",
-    "dream-like haze",
-    "mystical aura",
-    "geometric abstraction",
-    "organic growth",
-    "luminous trails",
-    "crystalline structure"
+    "figure cloaked in white",
+    "steampunk trees",
+    "forest spirits",
 ]
 
 
@@ -151,11 +142,19 @@ class DreamspaceNavigator:
         print(f"🎬 Generating initial animation batch ({self.batch_size} frames)...")
         
         def generate_initial():
+            start_time = time.time()
+            print(f"⏰ Initial batch start time: {time.strftime('%H:%M:%S', time.localtime(start_time))}")
+            
             self.img_gen.generate_animation_batch(
                 batch_size=self.batch_size, 
                 request_id="initial", 
                 **self.generation_params
             )
+            
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"⏱️ Initial batch generation time: {duration:.2f} seconds ({duration/60:.1f} minutes)")
+            print(f"📊 Initial batch rate: {self.batch_size/duration:.1f} images/second")
         
         # Start generation in background
         gen_thread = threading.Thread(target=generate_initial)
@@ -194,7 +193,9 @@ class DreamspaceNavigator:
         def generate_batch():
             try:
                 request_id = f"req_{time.time():.3f}"
+                start_time = time.time()
                 print(f"🎬 Starting generation request {request_id}")
+                print(f"⏰ Request start time: {time.strftime('%H:%M:%S', time.localtime(start_time))}")
                 
                 frames = self.img_gen.generate_animation_batch(
                     prompt=prompt,
@@ -203,11 +204,18 @@ class DreamspaceNavigator:
                     **self.generation_params
                 )
                 
+                end_time = time.time()
+                duration = end_time - start_time
+                
                 if frames:
                     print(f"✅ Completed generation request {request_id}")
+                    print(f"⏱️ Generation time: {duration:.2f} seconds ({duration/60:.1f} minutes)")
+                    print(f"📊 Rate: {self.batch_size/duration:.1f} images/second")
             except Exception as e:
+                end_time = time.time()
+                duration = end_time - start_time
                 if not self.img_gen.cancel_current_request:
-                    print(f"❌ Background generation failed: {e}")
+                    print(f"❌ Background generation failed after {duration:.2f}s: {e}")
         
         self.generation_thread = threading.Thread(target=generate_batch)
         self.generation_thread.start()
@@ -387,7 +395,7 @@ def main():
         server_url=server_url,
         image_size=image_size,
         batch_size=16,
-        initial_prompt="a surreal dreamlike forest"
+        initial_prompt="strange bright forest land, steampunk trees",
     )
     
     navigator.run()

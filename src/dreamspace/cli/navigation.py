@@ -59,7 +59,7 @@ Examples:
     )
     
     parser.add_argument(
-        "--prompt", type=str, default="a surreal dreamlike forest",
+        "--prompt", type=str, default="strange bright forest land, steampunk trees",
         help="Initial prompt for image generation"
     )
     
