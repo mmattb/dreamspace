@@ -388,6 +388,8 @@ def create_app(backend_type: str = "kandinsky_local",
             base_result = img_gen.backend.generate(prompt=request.prompt, **base_params)
             print("xxx", dir(base_result))
             print("xxx2", base_result.keys())
+            print("xxx3", type(base_result['latents']))
+            print("xxx4", base_result['latents'])
             base_latent = base_result.get('latents')
 
             # Ensure we have a tensor for latent wiggle
