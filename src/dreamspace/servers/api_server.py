@@ -357,7 +357,7 @@ def create_app(backend_type: str = "kandinsky_local",
             # Prepare generation parameters
             gen_params = {
                 k: v for k, v in request.dict().items() 
-                if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude', 'bifurcation_step']
+                if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude', 'bifurcation_step', 'output_format']
             }
 
             # Delegate batch generation with latent wiggle to the backend
