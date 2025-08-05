@@ -46,10 +46,11 @@ class GenerateBatchRequest(BaseModel):
     seed: Optional[int] = Field(None, description="Base seed for variations")
     noise_magnitude: Optional[float] = Field(0.3, description="Magnitude of noise for latent variations")
     bifurcation_step: Optional[int] = Field(3, description="Number of steps from end to bifurcate in bifurcated wiggle")
+    output_format: Optional[str] = Field("jpeg", description="Output format: 'jpeg' (base64), 'tensor' (numpy), or 'png' (base64)")
 
 
 class BatchImageResponse(BaseModel):
-    images: List[str] = Field(..., description="List of base64 encoded generated images")
+    images: List[str] = Field(..., description="List of base64 encoded images or serialized tensors")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata")
 
 
@@ -380,33 +381,113 @@ def create_app(backend_type: str = "kandinsky_local",
                 )
             else:
                 print(f"🔀 Using bifurcated wiggle with {request.bifurcation_step} refinement steps (default method)")
-                # Call the bifurcated wiggle method
+                # Call the bifurcated wiggle method with output format
                 result = img_gen.backend.generate_batch_with_bifurcated_wiggle(
                     prompt=request.prompt,
                     batch_size=batch_size,
                     noise_magnitude=request.noise_magnitude,
                     bifurcation_step=request.bifurcation_step,
+                    output_format="tensor" if request.output_format == "tensor" else "pil",
                     **gen_params
                 )
 
             all_images = result['images']
+            result_format = result.get('format', 'pil')
 
-            print(f"✅ Batch generation complete: {len(all_images)} images")
+            print(f"✅ Batch generation complete: {len(all_images)} images in {result_format} format")
 
-            # Convert all images to base64 using JPEG for much smaller file sizes
-            print("📦 Encoding images to JPEG...")
-            encoding_start = time.time()
+            # Handle different output formats
+            if request.output_format == "tensor" and result_format == "numpy_float32":
+                # Ultra-fast tensor serialization for local clients
+                print("🚀 Serializing tensors for high-speed local transfer...")
+                encoding_start = time.time()
+                
+                import numpy as np
+                import pickle
+                import gzip
+                
+                # Compress numpy array for network transfer
+                serialized_data = pickle.dumps({
+                    'images': all_images,  # numpy array shape (batch, h, w, 3) 
+                    'shape': all_images.shape,
+                    'dtype': str(all_images.dtype),
+                    'format': 'numpy_compressed'
+                })
+                
+                # Optional compression for network transfer
+                compressed_data = gzip.compress(serialized_data)
+                tensor_b64 = base64.b64encode(compressed_data).decode('utf-8')
+                
+                encoding_time = time.time() - encoding_start
+                print(f"🎯 Tensor serialization complete in {encoding_time:.3f}s")
+                print(f"   Original size: {all_images.nbytes/1024/1024:.1f}MB")
+                print(f"   Compressed size: {len(compressed_data)/1024/1024:.1f}MB")
+                print(f"   Compression ratio: {all_images.nbytes/len(compressed_data):.1f}x")
+                
+                return BatchImageResponse(
+                    images=[tensor_b64],  # Single serialized tensor containing all images
+                    metadata={
+                        "prompt": request.prompt,
+                        "parameters": gen_params,
+                        "batch_size": len(all_images),
+                        "animation_ready": True,
+                        "generation_time": time.time() - start_time,
+                        "generation_method": "latent_wiggle" if use_original else "bifurcated_wiggle",
+                        "output_format": "tensor",
+                        "tensor_shape": list(all_images.shape),
+                        "tensor_dtype": str(all_images.dtype),
+                        "compression": "gzip",
+                        "noise_magnitude": request.noise_magnitude,
+                        "bifurcation_step": None if use_original else request.bifurcation_step
+                    }
+                )
+            
+            else:
+                # Traditional PIL → JPEG → Base64 pipeline
+                print("📦 Encoding images to JPEG...")
+                encoding_start = time.time()
 
             def encode_single_image(args):
                 from io import BytesIO  # Import inside function to avoid scope issues
                 import base64
+                import time
                 i, image = args
-                buffer = BytesIO()
-                # Use JPEG with high quality for much smaller file sizes
-                image.save(buffer, format='JPEG', quality=90, optimize=True)
-                buffer_size = len(buffer.getvalue())
-                image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                return i, image_b64, buffer_size
+                
+                # Time the JPEG encoding
+                jpeg_start = time.time()
+                
+                if request.output_format == "jpeg_optimized" and hasattr(image, 'dtype'):
+                    # Direct numpy → JPEG encoding (skip PIL)
+                    import cv2
+                    # Convert from float [0,1] to uint8 [0,255] if needed
+                    if image.dtype == 'float32' or image.dtype == 'float64':
+                        image_array = (image * 255).astype('uint8')
+                    else:
+                        image_array = image
+                    
+                    # Direct JPEG encoding
+                    _, jpeg_bytes = cv2.imencode('.jpg', image_array, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    buffer_size = len(jpeg_bytes)
+                    jpeg_time = time.time() - jpeg_start
+                    
+                    # Time the base64 encoding
+                    b64_start = time.time()
+                    image_b64 = base64.b64encode(jpeg_bytes.tobytes()).decode('utf-8')
+                    b64_time = time.time() - b64_start
+                else:
+                    # Traditional PIL → JPEG encoding
+                    buffer = BytesIO()
+                    # Use JPEG with high quality for much smaller file sizes
+                    image.save(buffer, format='JPEG', quality=90, optimize=True)
+                    jpeg_time = time.time() - jpeg_start
+                    
+                    # Time the base64 encoding
+                    b64_start = time.time()
+                    buffer_size = len(buffer.getvalue())
+                    image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                    b64_time = time.time() - b64_start
+                
+                return i, image_b64, buffer_size, jpeg_time, b64_time
 
             # Use ThreadPoolExecutor for parallel encoding if we have many images
             if len(all_images) > 8:
@@ -419,17 +500,28 @@ def create_app(backend_type: str = "kandinsky_local",
                 results.sort(key=lambda x: x[0])
                 image_b64_list = [r[1] for r in results]
                 total_size = sum(r[2] for r in results)
+                total_jpeg_time = sum(r[3] for r in results)
+                total_b64_time = sum(r[4] for r in results)
 
                 print(f"  Parallel encoded {len(all_images)} images")
+                print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
+                print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
             else:
                 # Sequential encoding for smaller batches
                 image_b64_list = []
                 total_size = 0
+                total_jpeg_time = 0
+                total_b64_time = 0
 
                 for i, image in enumerate(all_images):
-                    _, image_b64, buffer_size = encode_single_image((i, image))
+                    _, image_b64, buffer_size, jpeg_time, b64_time = encode_single_image((i, image))
                     image_b64_list.append(image_b64)
                     total_size += buffer_size
+                    total_jpeg_time += jpeg_time
+                    total_b64_time += b64_time
+
+                print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
+                print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
 
             encoding_time = time.time() - encoding_start
             avg_size = total_size / len(all_images) if all_images else 0
@@ -445,13 +537,15 @@ def create_app(backend_type: str = "kandinsky_local",
                     "parameters": gen_params,
                     "batch_size": len(image_b64_list),
                     "animation_ready": True,
-                    "generation_time": elapsed,
+                    "generation_time": time.time() - start_time,
                     "generation_method": "latent_wiggle" if use_original else "bifurcated_wiggle",
                     "multi_gpu": False,  # Using single GPU with batch generation
                     "gpu_count": 1,
                     "seed": request.seed,
                     "base_seed": base_seed,
                     "variation_method": "latent_noise",
+                    "output_format": request.output_format or "jpeg",
+                    "encoding_time": encoding_time,
                     "noise_magnitude": request.noise_magnitude,
                     "bifurcation_step": None if use_original else request.bifurcation_step
                 }

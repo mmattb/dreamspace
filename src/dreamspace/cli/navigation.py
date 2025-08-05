@@ -101,6 +101,12 @@ Examples:
         help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3, set to 0 for original wiggle)"
     )
     
+    parser.add_argument(
+        "--output-format", type=str, default="jpeg", 
+        choices=["jpeg", "tensor", "png", "jpeg_optimized"],
+        help="Output format: 'jpeg' (default), 'tensor' (fast local), 'png', or 'jpeg_optimized' (skip PIL)"
+    )
+    
     return parser.parse_args()
 
 

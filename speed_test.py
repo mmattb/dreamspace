@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """Dreamspace Speed Test Utility
 
-A minimalist CLI utility for testing image generation performance witho        print(f"📏 Image size: {self.image_width}x{self.image_height}")
+A minimalist CLI utility for testing image generation performance witho        print(f"        print(f"🔮 Connecting to server: {server_url}")
+        print(f"📏 Image size: {self.image_width}x{self.image_height}")
+        print(f"📦 Batch size: {batch_size}")
+        print(f"🎚️ Noise magnitude: {self.noise_magnitude}")
+        print(f"🔀 Bifurcation step: {self.bifurcation_step}")
+        print(f"📄 Output format: {self.output_format}")
+        print(f"💭 Prompt: '{prompt}'")
+        print()ge size: {self.image_width}x{self.image_height}")
         print(f"📦 Batch size: {batch_size}")
         print(f"🔧 Noise magnitude: {self.noise_magnitude}")
         print(f"🔀 Bifurcation step: {self.bifurcation_step}")
@@ -101,6 +108,12 @@ Examples:
         help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3, set to 0 for original wiggle)"
     )
     
+    parser.add_argument(
+        "--output-format", type=str, default="jpeg", 
+        choices=["jpeg", "tensor", "png", "jpeg_optimized"],
+        help="Output format: 'jpeg' (default), 'tensor' (fast local), 'png', or 'jpeg_optimized' (skip PIL)"
+    )
+    
     # Speed test specific options
     parser.add_argument(
         "--rounds", type=int, default=1,
@@ -118,20 +131,22 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.3, bifurcation_step: int = 3):
+    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.3, bifurcation_step: int = 3, output_format: str = "jpeg"):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
         self.prompt = prompt
         self.noise_magnitude = noise_magnitude
         self.bifurcation_step = bifurcation_step
+        self.output_format = output_format
         
         # Generation parameters
         self.generation_params = {
             "width": self.image_width,
             "height": self.image_height,
             "noise_magnitude": self.noise_magnitude,
-            "bifurcation_step": self.bifurcation_step
+            "bifurcation_step": self.bifurcation_step,
+            "output_format": self.output_format
         }
         
         print(f"🔮 Connecting to server: {server_url}")
@@ -292,7 +307,8 @@ def main():
         batch_size=args.batch_size,
         prompt=args.prompt,
         noise_magnitude=args.noise_magnitude,
-        bifurcation_step=bifurcation_step
+        bifurcation_step=bifurcation_step,
+        output_format=args.output_format
     )    # Run speed test
     tester.run_multiple_rounds(
         num_rounds=args.rounds,

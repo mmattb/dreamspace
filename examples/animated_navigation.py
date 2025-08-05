@@ -17,8 +17,14 @@ Usage:
     # Run with command line arguments
     PYTHONPATH=src python examples/animated_navigation.py --size 512 --batch-size 8
     
-    # Run with custom server
-    PYTHONPATH=src python examples/animated_navigation.py --server http://localhost:8001
+    # Run with custom server and bifurcated wiggle
+    PYTHONPATH=src python examples/animated_navigation.py --server http://localhost:8001 --bifurcated-wiggle
+    
+    # Run with tensor output format for maximum speed
+    PYTHONPATH=src python examples/animated_navigation.py --output-format tensor
+    
+    # Run with custom noise magnitude and bifurcation step
+    PYTHONPATH=src python examples/animated_navigation.py --noise-magnitude 0.5 --bifurcation-step 5
 
 Controls:
   Arrow Keys: Navigate parameter space
@@ -55,11 +61,15 @@ MORPHS = [
 class DreamspaceNavigator:
     """Main application controller for the animated dreamspace navigator."""
     
-    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, initial_prompt: str):
+    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, initial_prompt: str, 
+                 noise_magnitude: float = 0.3, bifurcation_step: int = 3, output_format: str = "jpeg"):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
         self.initial_prompt = initial_prompt
+        self.noise_magnitude = noise_magnitude
+        self.bifurcation_step = bifurcation_step
+        self.output_format = output_format
         
         # Initialize pygame
         pygame.init()
@@ -85,7 +95,10 @@ class DreamspaceNavigator:
         # Generation parameters
         self.generation_params = {
             "width": self.image_width,
-            "height": self.image_height
+            "height": self.image_height,
+            "noise_magnitude": self.noise_magnitude,
+            "bifurcation_step": self.bifurcation_step,
+            "output_format": self.output_format
         }
         
         # Prompt state
@@ -353,7 +366,8 @@ class DreamspaceNavigator:
             status_lines = [
                 f"Effects: {', '.join(self.current_effects) if self.current_effects else 'None'}",
                 f"Animation: {'ON' if self.animation_enabled else 'OFF'} ({self.animation_speed} FPS)",
-                f"Rhythm: {rhythm_name} | Interpolation: {interpolation_status}"
+                f"Rhythm: {rhythm_name} | Interpolation: {interpolation_status}",
+                f"Format: {self.output_format} | Noise: {self.noise_magnitude} | Bifurcation: {self.bifurcation_step}"
             ]
             
             if status['cross_batch_active']:
@@ -396,6 +410,9 @@ def main():
         image_size=image_size,
         batch_size=16,
         initial_prompt="strange bright forest land, steampunk trees",
+        noise_magnitude=0.3,
+        bifurcation_step=3,
+        output_format="jpeg"
     )
     
     navigator.run()
@@ -411,11 +428,22 @@ def main_with_args():
     batch_size = args.batch_size
     initial_prompt = args.prompt
     
+    # Handle bifurcated wiggle flag
+    bifurcation_step = args.bifurcation_step
+    if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
+        bifurcation_step = max(bifurcation_step, 3)  # Ensure minimum of 3
+    
+    # Get output format if available, default to jpeg
+    output_format = getattr(args, 'output_format', 'jpeg')
+    
     navigator = DreamspaceNavigator(
         server_url=server_url,
         image_size=image_size,
         batch_size=batch_size,
-        initial_prompt=initial_prompt
+        initial_prompt=initial_prompt,
+        noise_magnitude=args.noise_magnitude,
+        bifurcation_step=bifurcation_step,
+        output_format=output_format
     )
     
     # Set initial configuration
@@ -424,19 +452,10 @@ def main_with_args():
     
     navigator.animation_speed = args.fps
     
-    # New latent wiggle and noise magnitude settings
+    # Set latent wiggle flag
     navigator.latent_wiggle = args.latent_wiggle
-    navigator.noise_magnitude = args.noise_magnitude
-    navigator.bifurcation_step = args.bifurcation_step
-    
-    # If bifurcated-wiggle flag is used, ensure bifurcation_step is set
     if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
-        navigator.bifurcation_step = max(navigator.bifurcation_step, 3)  # Ensure minimum of 3
         navigator.latent_wiggle = True  # Imply latent wiggle is enabled
-    
-    # Add noise_magnitude and bifurcation_step to generation parameters
-    navigator.generation_params["noise_magnitude"] = navigator.noise_magnitude
-    navigator.generation_params["bifurcation_step"] = navigator.bifurcation_step
 
     if navigator.latent_wiggle:
         method_name = "Bifurcated Latent Wiggle" if navigator.bifurcation_step > 0 else "Latent Wiggle"
@@ -444,6 +463,8 @@ def main_with_args():
         print(f"🔧 Noise Magnitude: {navigator.noise_magnitude}")
         if navigator.bifurcation_step > 0:
             print(f"🔀 Bifurcation Step: {navigator.bifurcation_step}")
+    
+    print(f"📄 Output Format: {navigator.output_format}")
     
     navigator.run()
 
