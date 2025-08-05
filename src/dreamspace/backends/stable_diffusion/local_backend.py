@@ -109,9 +109,14 @@ class LocalStableDiffusionBackend(ImgGenBackend):
         
         return_image = images[0] if num_images == 1 else images
         
+        # Debugging: Log the type and structure of latents
+        latents = getattr(result, 'latents', None)
+        if latents is not None:
+            print(f"🔍 Latents type: {type(latents)}, Latents shape: {getattr(latents, 'shape', 'N/A')}")
+
         return {
             'image': return_image,
-            'latents': getattr(result, 'latents', None),
+            'latents': latents,
             'embeddings': self._extract_text_embeddings(prompt)
         }
     
