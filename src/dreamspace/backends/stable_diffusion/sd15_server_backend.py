@@ -297,6 +297,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             print("xxxx", i)
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
+            print("yyyy", latent_input.shape)
 
             noise_pred = self.pipe.unet(
                 latent_input, t, encoder_hidden_states=prompt_embeds
