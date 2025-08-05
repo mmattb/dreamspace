@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Dreamspace Speed Test Utility
 
-A minimalist CLI utility for testing image generation performance without visual output.
+A minimalist CLI utility for testing image generation performance witho        print(f"📏 Image size: {self.image_width}x{self.image_height}")
+        print(f"📦 Batch size: {batch_size}")
+        print(f"🔧 Noise magnitude: {self.noise_magnitude}")
+        print(f"🔀 Bifurcation step: {self.bifurcation_step}")
+        print(f"💭 Prompt: '{prompt}'")isual output.
 Uses the same argument parsing as animated_navigation.py but runs headless.
 
 Usage:
@@ -83,8 +87,18 @@ Examples:
     )
 
     parser.add_argument(
+        "--bifurcated-wiggle", action="store_true",
+        help="Use bifurcated wiggle method (improved manifold adherence)"
+    )
+
+    parser.add_argument(
         "--noise-magnitude", type=float, default=0.05,
         help="Magnitude of noise for latent wiggle variations (default: 0.05)"
+    )
+
+    parser.add_argument(
+        "--bifurcation-step", type=int, default=5,
+        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 5, set to 0 for original wiggle)"
     )
     
     # Speed test specific options
@@ -104,18 +118,20 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.05):
+    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.05, bifurcation_step: int = 5):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
         self.prompt = prompt
         self.noise_magnitude = noise_magnitude
+        self.bifurcation_step = bifurcation_step
         
         # Generation parameters
         self.generation_params = {
             "width": self.image_width,
             "height": self.image_height,
-            "noise_magnitude": self.noise_magnitude
+            "noise_magnitude": self.noise_magnitude,
+            "bifurcation_step": self.bifurcation_step
         }
         
         print(f"🔮 Connecting to server: {server_url}")
@@ -264,16 +280,20 @@ def main():
         size = args.size
         image_size = (size, size)
     
+    # Handle bifurcated wiggle flag
+    bifurcation_step = args.bifurcation_step
+    if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
+        bifurcation_step = max(bifurcation_step, 5)  # Ensure minimum of 5
+
     # Create speed tester
     tester = SpeedTester(
         server_url=args.server,
         image_size=image_size,
         batch_size=args.batch_size,
         prompt=args.prompt,
-        noise_magnitude=args.noise_magnitude
-    )
-    
-    # Run speed test
+        noise_magnitude=args.noise_magnitude,
+        bifurcation_step=bifurcation_step
+    )    # Run speed test
     tester.run_multiple_rounds(
         num_rounds=args.rounds,
         warm_up=args.warm_up

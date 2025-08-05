@@ -87,8 +87,18 @@ Examples:
     )
 
     parser.add_argument(
+        "--bifurcated-wiggle", action="store_true",
+        help="Use bifurcated wiggle method (improved manifold adherence)"
+    )
+
+    parser.add_argument(
         "--noise-magnitude", type=float, default=0.05,
         help="Magnitude of noise for latent wiggle variations (default: 0.05)"
+    )
+
+    parser.add_argument(
+        "--bifurcation-step", type=int, default=5,
+        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 5, set to 0 for original wiggle)"
     )
     
     return parser.parse_args()

@@ -427,13 +427,23 @@ def main_with_args():
     # New latent wiggle and noise magnitude settings
     navigator.latent_wiggle = args.latent_wiggle
     navigator.noise_magnitude = args.noise_magnitude
+    navigator.bifurcation_step = args.bifurcation_step
     
-    # Add noise_magnitude to generation parameters
+    # If bifurcated-wiggle flag is used, ensure bifurcation_step is set
+    if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
+        navigator.bifurcation_step = max(navigator.bifurcation_step, 5)  # Ensure minimum of 5
+        navigator.latent_wiggle = True  # Imply latent wiggle is enabled
+    
+    # Add noise_magnitude and bifurcation_step to generation parameters
     navigator.generation_params["noise_magnitude"] = navigator.noise_magnitude
+    navigator.generation_params["bifurcation_step"] = navigator.bifurcation_step
 
     if navigator.latent_wiggle:
-        print("✨ Latent Wiggle Pipeline Enabled")
+        method_name = "Bifurcated Latent Wiggle" if navigator.bifurcation_step > 0 else "Latent Wiggle"
+        print(f"✨ {method_name} Pipeline Enabled")
         print(f"🔧 Noise Magnitude: {navigator.noise_magnitude}")
+        if navigator.bifurcation_step > 0:
+            print(f"🔀 Bifurcation Step: {navigator.bifurcation_step}")
     
     navigator.run()
 
