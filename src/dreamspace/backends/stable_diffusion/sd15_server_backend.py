@@ -293,7 +293,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         )
 
         # Step 4: Run the diffusion loop manually
-        for t in self.pipe.scheduler.timesteps:
+        for i, t in enumerate(self.pipe.scheduler.timesteps):
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
@@ -305,6 +305,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
+            
+            # Clean up intermediate tensors to free GPU memory
+            del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
+            
+            # Periodic GPU cache cleanup (every 10 steps)
+            if i % 10 == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Step 5: Create additional latents by adding noise (wiggle)
         latents_batch = [latents]
