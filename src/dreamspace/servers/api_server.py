@@ -402,27 +402,25 @@ def create_app(backend_type: str = "kandinsky_local",
                 print("🚀 Serializing tensors for high-speed local transfer...")
                 encoding_start = time.time()
                 
-                import numpy as np
-                import pickle
-                import gzip
+                import torch
+                from io import BytesIO
                 
-                # Compress numpy array for network transfer
-                serialized_data = pickle.dumps({
-                    'images': all_images,  # numpy array shape (batch, h, w, 3) 
-                    'shape': all_images.shape,
-                    'dtype': str(all_images.dtype),
-                    'format': 'numpy_compressed'
-                })
+                # Convert numpy back to torch tensor for fast serialization
+                tensor_data = torch.from_numpy(all_images)
                 
-                # Optional compression for network transfer
-                compressed_data = gzip.compress(serialized_data)
-                tensor_b64 = base64.b64encode(compressed_data).decode('utf-8')
+                # Use torch.save to BytesIO - much faster than pickle
+                buffer = BytesIO()
+                torch.save(tensor_data, buffer)
+                buffer.seek(0)
+                tensor_bytes = buffer.getvalue()
+                
+                # Base64 encode for JSON transfer
+                tensor_b64 = base64.b64encode(tensor_bytes).decode('utf-8')
                 
                 encoding_time = time.time() - encoding_start
                 print(f"🎯 Tensor serialization complete in {encoding_time:.3f}s")
-                print(f"   Original size: {all_images.nbytes/1024/1024:.1f}MB")
-                print(f"   Compressed size: {len(compressed_data)/1024/1024:.1f}MB")
-                print(f"   Compression ratio: {all_images.nbytes/len(compressed_data):.1f}x")
+                print(f"   Tensor size: {len(tensor_bytes)/1024/1024:.1f}MB")
+                print(f"   Base64 size: {len(tensor_b64)/1024/1024:.1f}MB")
                 
                 return BatchImageResponse(
                     images=[tensor_b64],  # Single serialized tensor containing all images
@@ -436,7 +434,7 @@ def create_app(backend_type: str = "kandinsky_local",
                         "output_format": "tensor",
                         "tensor_shape": list(all_images.shape),
                         "tensor_dtype": str(all_images.dtype),
-                        "compression": "gzip",
+                        "serialization": "torch_save",
                         "noise_magnitude": request.noise_magnitude,
                         "bifurcation_step": None if use_original else request.bifurcation_step
                     }

@@ -138,9 +138,19 @@ class AnimatedRemoteImgGen:
                     return []
                 
                 if server_format == "tensor":
-                    # Deserialize tensor data
+                    # Deserialize tensor data using torch.load
+                    import torch
+                    from io import BytesIO
+                    
                     tensor_bytes = base64.b64decode(image_data)
-                    tensor_array = pickle.loads(gzip.decompress(tensor_bytes))
+                    buffer = BytesIO(tensor_bytes)
+                    tensor_data = torch.load(buffer, map_location='cpu')
+                    
+                    # Convert tensor to numpy array
+                    if isinstance(tensor_data, torch.Tensor):
+                        tensor_array = tensor_data.numpy()
+                    else:
+                        tensor_array = tensor_data
                     
                     # Convert tensor to PIL Image
                     # Tensor should be in format (H, W, C) with values 0-255
