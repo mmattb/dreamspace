@@ -109,7 +109,9 @@ class LocalStableDiffusionBackend(ImgGenBackend):
         
         return_image = images[0] if num_images == 1 else images
         
-        # Debugging: Log the type and structure of latents
+        # Debugging: Log the entire result to inspect latents
+        print(f"🔍 Backend generate result: {result}")
+
         latents = getattr(result, 'latents', None)
         if latents is not None:
             print(f"🔍 Latents type: {type(latents)}, Latents shape: {getattr(latents, 'shape', 'N/A')}")
@@ -125,8 +127,6 @@ class LocalStableDiffusionBackend(ImgGenBackend):
         
         Args:
             image: Source image to transform
-            prompt: Text description guiding the transformation
-            strength: How much to change the image (0.0-1.0)
             **kwargs: Additional generation parameters
             
         Returns:

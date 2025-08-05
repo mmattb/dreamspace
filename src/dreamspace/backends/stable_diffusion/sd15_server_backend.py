@@ -112,10 +112,16 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         images = result.images
         print(f"🖼️ Generated {len(images)} images in parallel on {self.device}")
         
-        # Always return the full list of images for batch processing
+        # Debugging: Log the latents returned by the pipeline
+        latents = getattr(result, 'latents', None)
+        if latents is not None:
+            print(f"🔍 Latents type: {type(latents)}, Latents shape: {getattr(latents, 'shape', 'N/A')}")
+        else:
+            print("⚠️ No latents returned by the pipeline")
+
         return {
             'image': images,  # Return the full list, not just the first image
-            'latents': getattr(result, 'latents', None),
+            'latents': latents,
             'embeddings': self._extract_text_embeddings(prompt)
         }
     
