@@ -431,17 +431,12 @@ def create_app(backend_type: str = "kandinsky_local",
                     image_b64_list.append(image_b64)
                     total_size += buffer_size
 
-                    if i % 4 == 0:  # Print every 4th image to reduce spam
-                        print(f"  Encoded image {i+1}/{len(all_images)} ({buffer_size/1024:.1f}KB)")
-
             encoding_time = time.time() - encoding_start
             avg_size = total_size / len(all_images) if all_images else 0
             print(f"📦 Encoding complete in {encoding_time:.1f}s - Total: {total_size/1024/1024:.1f}MB, Avg: {avg_size/1024:.1f}KB per image")
 
             elapsed = time.time() - start_time
             avg_time = elapsed / len(all_images) if all_images else 0
-
-            print(f"✅ Latent Wiggle Batch complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
 
             return BatchImageResponse(
                 images=image_b64_list,
