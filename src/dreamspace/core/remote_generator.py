@@ -80,7 +80,8 @@ class AnimatedRemoteImgGen:
             "height": kwargs.get("height", 512),
             "num_inference_steps": kwargs.get("num_inference_steps", 20),
             "guidance_scale": kwargs.get("guidance_scale", 7.5),
-            "seed": kwargs.get("seed", 42)
+            "seed": kwargs.get("seed", 42),
+            "noise_magnitude": kwargs.get("noise_magnitude", 0.05)
         }
         
         print(f"🎬 Generating {batch_size} frame animation [{request_id[:8]}]: '{use_prompt[:50]}...'")
