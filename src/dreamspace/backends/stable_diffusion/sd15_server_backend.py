@@ -68,25 +68,25 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             print(f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)")
         
         # Load image-to-image pipeline
-        self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
-            self.model_id,
-            **pipeline_kwargs
-        )
+        #self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
+        #    self.model_id,
+        #    **pipeline_kwargs
+        #)
         
-        # Move pipeline to specified device
-        self.img2img_pipe = self.img2img_pipe.to(self.device)
-        print(f"  📍 Image2Image pipeline moved to {self.device}")
+        ## Move pipeline to specified device
+        #self.img2img_pipe = self.img2img_pipe.to(self.device)
+        #print(f"  📍 Image2Image pipeline moved to {self.device}")
         
-        if self.device == "cuda" or self.device == "cuda:0":
-            self.img2img_pipe.enable_model_cpu_offload()
-            print(f"  💾 CPU offload enabled for {self.device}")
-        else:
-            print(f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)")
+        #if self.device == "cuda" or self.device == "cuda:0":
+        #    self.img2img_pipe.enable_model_cpu_offload()
+        #    print(f"  💾 CPU offload enabled for {self.device}")
+        #else:
+        #    print(f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)")
         
         # Enable memory optimizations
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
-            self.img2img_pipe.enable_xformers_memory_efficient_attention()
+            #self.img2img_pipe.enable_xformers_memory_efficient_attention()
             print("✅ XFormers memory optimization enabled")
         except Exception:
             print("⚠️ XFormers not available, using default attention")
