@@ -338,8 +338,29 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         print(f"🔍 GPU memory after cat: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
 
         # Step 6: Decode the batch of latents to images
+        # CRITICAL: Temporarily disable CPU offloading for manual VAE operations
+        print(f"🔍 VAE device before decode: {self.pipe.vae.device}")
+        
+        # Ensure VAE is on GPU for manual operation
+        if hasattr(self.pipe, '_cpu_offload_hooks'):
+            print("🔍 CPU offload detected - this may cause VAE memory issues during manual decode")
+        
+        # Force VAE to GPU if needed
+        original_vae_device = self.pipe.vae.device
+        if self.pipe.vae.device.type == 'cpu':
+            print("🔍 Moving VAE from CPU to GPU for manual decode")
+            self.pipe.vae = self.pipe.vae.to(self.device)
+        
+        print(f"🔍 About to decode batch of shape {latents_batch.shape}")
+        print(f"🔍 Expected output tensor size: {latents_batch.shape[0] * 3 * 512 * 512 * 2 / 1024**3:.2f}GB (fp16)")
+        
         images = self.pipe.vae.decode(latents_batch / 0.18215).sample
         print(f"🔍 GPU memory after decode: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+        
+        # Restore original VAE device if changed
+        if original_vae_device.type == 'cpu':
+            print("🔍 Restoring VAE to CPU for offloading")
+            self.pipe.vae = self.pipe.vae.to('cpu')
 
         return {
             'images': images,
