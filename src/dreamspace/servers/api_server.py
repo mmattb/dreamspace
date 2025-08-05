@@ -385,7 +385,8 @@ def create_app(backend_type: str = "kandinsky_local",
             base_params['num_images_per_prompt'] = 1  # Just one base latent
 
             print(f"📸 Generating base latent with seed {base_seed}")
-            base_latent = img_gen.gen_latent(prompt=request.prompt, **base_params)
+            base_result = img_gen.backend.generate(prompt=request.prompt, **base_params)
+            base_latent = base_result.get('latents')
 
             # Ensure we have a tensor for latent wiggle
             if not isinstance(base_latent, torch.Tensor):
