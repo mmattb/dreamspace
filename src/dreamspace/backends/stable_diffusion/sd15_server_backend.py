@@ -254,6 +254,15 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     
     def generate_batch_with_latent_wiggle(self, prompt: str, batch_size: int, noise_magnitude: float, **kwargs) -> Dict[str, Any]:
         """Generate a batch of images with latent wiggle variations."""
+        # Force all models to eval mode
+        self.pipe.unet.eval()
+        self.pipe.vae.eval() 
+        self.pipe.text_encoder.eval()
+        
+        if hasattr(self.pipe.vae, 'enable_slicing'):
+            self.pipe.vae.enable_slicing()
+            print("🔍 Enabled VAE slicing for memory efficiency")
+
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
@@ -293,15 +302,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         )
 
         # Step 4: Run the diffusion loop manually
-        print(f"🔍 Initial GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
-        print(f"🔍 Latents shape: {latents.shape}, size: {latents.numel() * latents.element_size() / 1024**2:.2f}MB")
-        print(f"🔍 Prompt embeds shape: {prompt_embeds.shape}, size: {prompt_embeds.numel() * prompt_embeds.element_size() / 1024**2:.2f}MB")
-        
         for i, t in enumerate(self.pipe.scheduler.timesteps):
-            print(f"xxxx Step {i}, GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-            print(f"yyyy latent_input shape: {latent_input.shape}, size: {latent_input.numel() * latent_input.element_size() / 1024**2:.2f}MB")
 
             # Use torch.no_grad() to prevent gradient accumulation
             with torch.no_grad():
@@ -318,13 +321,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
             
             # More aggressive cleanup every step for debugging
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            #if torch.cuda.is_available():
+            #    torch.cuda.empty_cache()
                 
-            #if i >= 2:  # Stop after a few steps for debugging
-            #    print(f"🛑 Stopping early for memory debugging")
-            #    break
-
         # Step 5: Create additional latents by adding noise (wiggle)
         latents_batch = [latents]
         if batch_size > 1:
@@ -332,38 +331,17 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 noise = torch.randn_like(latents) * noise_magnitude
                 latents_batch.append(latents + noise)
 
-        print(f"🔍 GPU memory after latents: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
         # Concatenate all latents into a single batch
         latents_batch = torch.cat(latents_batch, dim=0)
-        print(f"🔍 GPU memory after cat: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
 
         # Step 6: Decode the batch of latents to images
-        # CRITICAL: Ensure all models are in eval mode and no gradients accumulate
-        print(f"🔍 UNet training mode: {self.pipe.unet.training}")
-        print(f"🔍 VAE training mode: {self.pipe.vae.training}")
-        print(f"🔍 Text encoder training mode: {self.pipe.text_encoder.training}")
-        
-        # Force all models to eval mode
-        self.pipe.unet.eval()
-        self.pipe.vae.eval() 
-        self.pipe.text_encoder.eval()
-        print("🔍 Forced all models to eval mode")
-        
-        # Use the same VAE optimizations that auto pipeline uses
-        print(f"🔍 VAE decode optimizations enabled: {hasattr(self.pipe.vae, 'enable_slicing')}")
-        
-        # Enable sliced VAE decode for memory efficiency (like auto pipeline does)
-        if hasattr(self.pipe.vae, 'enable_slicing'):
-            self.pipe.vae.enable_slicing()
-            print("🔍 Enabled VAE slicing for memory efficiency")
+       
         
         # Use direct VAE decode with explicit no_grad
         with torch.no_grad():
             # Ensure no computation graph is built
             latents_batch.requires_grad_(False)
             images = self.pipe.vae.decode(latents_batch / 0.18215).sample
-        
-        print(f"🔍 GPU memory after decode: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
         
         # Convert tensor images to PIL Images (like auto pipeline does)
         # The tensor is in range [-1, 1], need to convert to [0, 1] then to PIL
