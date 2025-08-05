@@ -427,6 +427,9 @@ def main_with_args():
     # New latent wiggle and noise magnitude settings
     navigator.latent_wiggle = args.latent_wiggle
     navigator.noise_magnitude = args.noise_magnitude
+    
+    # Add noise_magnitude to generation parameters
+    navigator.generation_params["noise_magnitude"] = navigator.noise_magnitude
 
     if navigator.latent_wiggle:
         print("✨ Latent Wiggle Pipeline Enabled")

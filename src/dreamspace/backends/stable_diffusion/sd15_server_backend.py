@@ -47,7 +47,6 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         if self.disable_safety_checker:
             pipeline_kwargs["safety_checker"] = None
             pipeline_kwargs["requires_safety_checker"] = False
-            print("  🚫 NSFW safety checker disabled (fixes false positives)")
         
         # Load text-to-image pipeline
         self.pipe = AutoPipelineForText2Image.from_pretrained(
@@ -261,7 +260,6 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         if hasattr(self.pipe.vae, 'enable_slicing'):
             self.pipe.vae.enable_slicing()
-            print("🔍 Enabled VAE slicing for memory efficiency")
 
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:

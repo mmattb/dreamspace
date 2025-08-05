@@ -104,22 +104,25 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str):
+    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.05):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
         self.prompt = prompt
+        self.noise_magnitude = noise_magnitude
         
         # Generation parameters
         self.generation_params = {
             "width": self.image_width,
-            "height": self.image_height
+            "height": self.image_height,
+            "noise_magnitude": self.noise_magnitude
         }
         
         print(f"🔮 Connecting to server: {server_url}")
         print(f"📏 Image size: {self.image_width}x{self.image_height}")
         print(f"📦 Batch size: {batch_size}")
-        print(f"💭 Prompt: '{prompt}'")
+        print(f"� Noise magnitude: {self.noise_magnitude}")
+        print(f"�💭 Prompt: '{prompt}'")
         print()
         
         # Initialize image generator
@@ -266,7 +269,8 @@ def main():
         server_url=args.server,
         image_size=image_size,
         batch_size=args.batch_size,
-        prompt=args.prompt
+        prompt=args.prompt,
+        noise_magnitude=args.noise_magnitude
     )
     
     # Run speed test
