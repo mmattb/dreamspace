@@ -424,6 +424,14 @@ def main_with_args():
     
     navigator.animation_speed = args.fps
     
+    # New latent wiggle and noise magnitude settings
+    navigator.latent_wiggle = args.latent_wiggle
+    navigator.noise_magnitude = args.noise_magnitude
+
+    if navigator.latent_wiggle:
+        print("✨ Latent Wiggle Pipeline Enabled")
+        print(f"🔧 Noise Magnitude: {navigator.noise_magnitude}")
+    
     navigator.run()
 
 

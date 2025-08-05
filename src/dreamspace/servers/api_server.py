@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from PIL import Image
 import uvicorn
+import torch
 
 try:
     # Try relative imports first (when used as a package)
@@ -43,6 +44,7 @@ class GenerateBatchRequest(BaseModel):
     width: Optional[int] = Field(768, description="Image width")
     height: Optional[int] = Field(768, description="Image height")
     seed: Optional[int] = Field(None, description="Base seed for variations")
+    noise_magnitude: Optional[float] = Field(0.05, description="Magnitude of noise for latent variations")
 
 
 class BatchImageResponse(BaseModel):
@@ -343,100 +345,92 @@ def create_app(backend_type: str = "kandinsky_local",
         """Generate a batch of image variations for animation with smart chunking for multi-GPU."""
         import traceback
         import time
-        
+
         try:
             img_gen = get_img_gen()
-            
+
             # Limit batch size for server stability
             batch_size = min(request.batch_size, 32)
-            
+
             # Prepare generation parameters
             gen_params = {
                 k: v for k, v in request.dict().items() 
-                if v is not None and k not in ['prompt', 'batch_size']
+                if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude']
             }
-            
+
             print(f"🎬 Generating batch of {batch_size} coherent variations...")
             start_time = time.time()
-            
+
             # Use the backend's native batch generation with num_images_per_prompt
             all_images = []
             base_seed = request.seed or 42
-            
+
             print(f"  🎲 Using base seed: {base_seed} for parallel batch generation")
-            
+
             # Generate all images in parallel using num_images_per_prompt
             batch_params = {**gen_params}
             batch_params['seed'] = base_seed
             batch_params['num_images_per_prompt'] = batch_size
-            
+
             print(f"  � Generating {batch_size} images in parallel from same generator state...")
-            
+
             # For batch generation with tight similarity, we use img2img approach:
             # 1. Generate one base image with text2img 
             # 2. Use img2img with very low strength to create similar variations
-            
+
             print(f"🎯 Generating 1 base image + {batch_size-1} img2img variations for tight similarity")
-            
+
             # Step 1: Generate base image using text2img
             base_params = gen_params.copy()
             base_params['num_images_per_prompt'] = 1  # Just one base image
-            
+
             print(f"📸 Generating base image with seed {base_seed}")
             base_result = img_gen.gen(prompt=request.prompt, **base_params)
-            
+
             # Handle the base result
             if isinstance(base_result, dict) and 'image' in base_result:
                 base_images = base_result['image']
             else:
                 base_images = base_result
-            
+
             # Ensure we have a list and get the first image
             if not isinstance(base_images, list):
                 base_images = [base_images]
-            
+
             base_image = base_images[0]
             all_images = [base_image]  # Start with base image
-            
+
             print(f"✅ Base image generated successfully")
-            
-            # Step 2: Generate variations using img2img with very low strength
+
+            # Step 2: Generate variations using latent noise
             if batch_size > 1:
                 variations_needed = batch_size - 1
-                print(f"🔄 Now generating {variations_needed} img2img variations with strength=0.15 for tight similarity")
-                
-                # Use img2img with batch generation and very low strength
-                img2img_params = {k: v for k, v in gen_params.items() if k not in ['seed']}
-                img2img_params['num_images_per_prompt'] = variations_needed
-                img2img_params['seed'] = base_seed  # Use same seed for consistency
-                
-                # Call img2img backend directly for batch variations
-                variation_result = img_gen.backend.img2img(
-                    image=base_image,
-                    prompt=request.prompt,
-                    strength=0.15,  # Very low strength for subtle variations
-                    **img2img_params
-                )
-                
-                # Handle the variation results
-                if isinstance(variation_result, dict) and 'image' in variation_result:
-                    variation_images = variation_result['image']
-                else:
-                    variation_images = variation_result
-                
+                print(f"🔄 Now generating {variations_needed} latent variations with noise magnitude={request.noise_magnitude}")
+
+                # Create latent variations
+                latents_batch = [base_image]
+                for _ in range(variations_needed):
+                    noise = torch.randn_like(base_image) * request.noise_magnitude
+                    latents_batch.append(base_image + noise)
+
+                latents_batch = torch.cat(latents_batch, dim=0)
+
+                # Decode to images
+                variation_images = img_gen.backend.vae.decode(latents_batch / 0.18215).sample
+
                 # Ensure we have a list
                 if not isinstance(variation_images, list):
                     variation_images = [variation_images]
-                
+
                 all_images.extend(variation_images)
-                print(f"✅ Generated {len(variation_images)} img2img variations in parallel")
-            
-            print(f"✅ Total: {len(all_images)} images generated using img2img approach for tight similarity")
-            
+                print(f"✅ Generated {len(variation_images)} latent variations")
+
+            print(f"✅ Total: {len(all_images)} images generated using latent noise approach")
+
             # Convert all images to base64 using JPEG for much smaller file sizes
             print("📦 Encoding images to JPEG...")
             encoding_start = time.time()
-            
+
             def encode_single_image(args):
                 from io import BytesIO  # Import inside function to avoid scope issues
                 import base64
@@ -447,52 +441,52 @@ def create_app(backend_type: str = "kandinsky_local",
                 buffer_size = len(buffer.getvalue())
                 image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
                 return i, image_b64, buffer_size
-            
+
             # Use ThreadPoolExecutor for parallel encoding if we have many images
             if len(all_images) > 8:
                 from concurrent.futures import ThreadPoolExecutor
                 import threading
-                
+
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     results = list(executor.map(encode_single_image, enumerate(all_images)))
-                
+
                 # Sort results by original index and extract data
                 results.sort(key=lambda x: x[0])
                 image_b64_list = [r[1] for r in results]
                 total_size = sum(r[2] for r in results)
-                
+
                 print(f"  Parallel encoded {len(all_images)} images")
             else:
                 # Sequential encoding for smaller batches
                 image_b64_list = []
                 total_size = 0
-                
+
                 for i, image in enumerate(all_images):
                     _, image_b64, buffer_size = encode_single_image((i, image))
                     image_b64_list.append(image_b64)
                     total_size += buffer_size
-                    
+
                     if i % 4 == 0:  # Print every 4th image to reduce spam
                         print(f"  Encoded image {i+1}/{len(all_images)} ({buffer_size/1024:.1f}KB)")
-            
+
             encoding_time = time.time() - encoding_start
             avg_size = total_size / len(all_images) if all_images else 0
             print(f"📦 Encoding complete in {encoding_time:.1f}s - Total: {total_size/1024/1024:.1f}MB, Avg: {avg_size/1024:.1f}KB per image")
-            
+
             elapsed = time.time() - start_time
             avg_time = elapsed / len(all_images) if all_images else 0
-            
+
             # Determine generation method
             if batch_size == 1:
                 method = "single_text2img"
             else:
-                method = "text2img_plus_parallel_img2img_variations"
-            
+                method = "latent_noise_variations"
+
             print(f"✅ {method.replace('_', ' ').title()} complete in {elapsed:.1f}s ({avg_time:.2f}s per image)")
-            
+
             # Create list of seeds that were used for debugging
             seeds_used = [base_seed] * len(all_images)  # All images use the same seed
-            
+
             return BatchImageResponse(
                 images=image_b64_list,
                 metadata={
@@ -507,11 +501,11 @@ def create_app(backend_type: str = "kandinsky_local",
                     "seed": request.seed,
                     "base_seed": base_seed,
                     "seeds_used": seeds_used,
-                    "variation_method": "img2img_parallel_low_strength",
-                    "variation_strength": 0.15
+                    "variation_method": "latent_noise",
+                    "noise_magnitude": request.noise_magnitude
                 }
             )
-            
+
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
