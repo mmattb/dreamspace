@@ -87,6 +87,17 @@ Examples:
         help="Initial prompt for image generation"
     )
     
+    # Interpolated embeddings mode
+    parser.add_argument(
+        "--prompt2", type=str, 
+        help="Second prompt for interpolated embeddings mode (enables interpolation between prompt and prompt2)"
+    )
+    
+    parser.add_argument(
+        "--interpolation-mode", action="store_true",
+        help="Enable interpolated embeddings mode (requires --prompt2)"
+    )
+    
     # Generation options (bifurcated wiggle is now the default method)
     parser.add_argument(
         "--noise-magnitude", type=float, default=0.3,
@@ -121,13 +132,16 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "png"):
+    def __init__(self, server_url: str, prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "png", interpolation_mode: bool = False, prompt2: str = None):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
         self.prompt = prompt
         self.noise_magnitude = noise_magnitude
         self.bifurcation_step = bifurcation_step
+        self.output_format = output_format
+        self.interpolation_mode = interpolation_mode
+        self.prompt2 = prompt2
         self.output_format = output_format
         
         # Generation parameters
@@ -178,7 +192,11 @@ class SpeedTester:
     
     def run_speed_test(self, round_num: int = 1):
         """Run a single speed test round."""
-        print(f"🏃 Running speed test round {round_num}...")
+        if self.interpolation_mode and self.prompt2:
+            print(f"🌈 Running interpolated embeddings speed test round {round_num}...")
+            print(f"   '{self.prompt}' → '{self.prompt2}'")
+        else:
+            print(f"🏃 Running speed test round {round_num}...")
         
         start_time = time.time()
         request_id = f"test_round_{round_num}_{start_time:.3f}"
@@ -186,12 +204,23 @@ class SpeedTester:
         print(f"⏰ Start time: {time.strftime('%H:%M:%S', time.localtime(start_time))}")
         
         try:
-            frames = self.img_gen.generate_animation_batch(
-                prompt=self.prompt,
-                batch_size=self.batch_size,
-                request_id=request_id,
-                **self.generation_params
-            )
+            if self.interpolation_mode and self.prompt2:
+                # Use interpolated embeddings generation
+                frames = self.img_gen.generate_interpolated_animation_batch(
+                    prompt1=self.prompt,
+                    prompt2=self.prompt2,
+                    batch_size=self.batch_size,
+                    request_id=request_id,
+                    **self.generation_params
+                )
+            else:
+                # Use regular bifurcated wiggle generation
+                frames = self.img_gen.generate_animation_batch(
+                    prompt=self.prompt,
+                    batch_size=self.batch_size,
+                    request_id=request_id,
+                    **self.generation_params
+                )
             
             end_time = time.time()
             duration = end_time - start_time
@@ -202,6 +231,10 @@ class SpeedTester:
                 print(f"⏱️ Duration: {duration:.2f} seconds ({duration/60:.1f} minutes)")
                 print(f"📊 Rate: {images_per_second:.2f} images/second")
                 print(f"🖼️ Generated: {len(frames)} images")
+                if self.interpolation_mode:
+                    print(f"🌈 Mode: Interpolated embeddings")
+                else:
+                    print(f"🔀 Mode: Bifurcated wiggle")
                 print()
                 
                 return {
@@ -278,6 +311,14 @@ def main():
     parser = create_speed_test_parser()
     args = parser.parse_args()
     
+    # Check for interpolation mode
+    interpolation_mode = getattr(args, 'interpolation_mode', False) or getattr(args, 'prompt2', None) is not None
+    prompt2 = getattr(args, 'prompt2', None)
+    
+    if interpolation_mode and not prompt2:
+        print("❌ Interpolation mode requires --prompt2 to be specified")
+        return
+    
     # Get image dimensions
     if args.width and args.height:
         image_size = (args.width, args.height)
@@ -285,7 +326,7 @@ def main():
         size = args.size
         image_size = (size, size)
     
-    # Bifurcated wiggle is now the default method
+    # Bifurcated wiggle is now the default method (ignored in interpolation mode)
     bifurcation_step = 3
 
     # Create speed tester
@@ -296,8 +337,23 @@ def main():
         prompt=args.prompt,
         noise_magnitude=args.noise_magnitude,
         bifurcation_step=bifurcation_step,
-        output_format=args.output_format
-    )    # Run speed test
+        output_format=args.output_format,
+        interpolation_mode=interpolation_mode,
+        prompt2=prompt2
+    )
+    
+    # Print test configuration
+    if interpolation_mode:
+        print(f"🌈 Interpolated Embeddings Speed Test")
+        print(f"🔢 Prompt 1: {args.prompt}")
+        print(f"🔢 Prompt 2: {prompt2}")
+        print(f"📊 Interpolation Steps: {tester.batch_size}")
+    else:
+        print(f"✨ Bifurcated Latent Wiggle Speed Test")
+        print(f"🔧 Noise Magnitude: {tester.noise_magnitude}")
+        print(f"🔀 Bifurcation Step: {tester.bifurcation_step}")
+    
+    # Run speed test
     tester.run_multiple_rounds(
         num_rounds=args.rounds,
         warm_up=args.warm_up

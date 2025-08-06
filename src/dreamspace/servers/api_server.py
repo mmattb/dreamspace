@@ -52,6 +52,13 @@ class GenerateBatchRequest(BaseModel):
     output_format: Optional[str] = Field("png", description="Output format: 'png' (base64), 'jpeg' (base64), or 'tensor' (numpy)")
 
 
+class GenerateInterpolatedEmbeddingsRequest(BaseModel):
+    prompt1: str = Field(..., description="Starting text prompt for interpolation")
+    prompt2: str = Field(..., description="Ending text prompt for interpolation")
+    batch_size: int = Field(..., description="Number of interpolation steps (including start and end)")
+    output_format: Optional[str] = Field("png", description="Output format: 'png' (base64), 'jpeg' (base64), or 'tensor' (numpy)")
+
+
 class BatchImageResponse(BaseModel):
     images: List[str] = Field(..., description="List of base64 encoded images or serialized tensors")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata")
@@ -550,6 +557,66 @@ def create_app(backend_type: str = "kandinsky_local",
             return {"result": result.tolist() if torch.is_tensor(result) else result}
             
         except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.post("/generate_interpolated_embeddings", response_model=BatchImageResponse)
+    async def generate_interpolated_embeddings(request: GenerateInterpolatedEmbeddingsRequest):
+        """Generate a batch of images using interpolated embeddings between two prompts."""
+        try:
+            img_gen = get_img_gen()
+            backend = img_gen.backend
+            result = backend.generate_interpolated_embeddings(
+                prompt1=request.prompt1,
+                prompt2=request.prompt2,
+                batch_size=request.batch_size,
+                output_format=request.output_format
+            )
+
+            # Handle different output formats similar to generate_batch
+            if request.output_format == "tensor" and result.get('format') == 'torch_tensor':
+                # Return tensor format for high-speed processing
+                import torch
+                tensor_data = result['images']
+                
+                buffer = BytesIO()
+                torch.save(tensor_data, buffer)
+                buffer.seek(0)
+                tensor_bytes = buffer.getvalue()
+                tensor_b64 = base64.b64encode(tensor_bytes).decode('utf-8')
+                
+                return BatchImageResponse(
+                    images=[tensor_b64],
+                    metadata={
+                        **result,
+                        "tensor_shape": list(tensor_data.shape),
+                        "tensor_dtype": str(tensor_data.dtype),
+                        "serialization": "torch_save"
+                    }
+                )
+            else:
+                # Convert PIL images to base64
+                images_base64 = []
+                for image in result["images"]:
+                    buffer = BytesIO()
+                    if request.output_format == "jpeg":
+                        image.save(buffer, format='JPEG', quality=90, optimize=True)
+                    else:  # Default to PNG
+                        image.save(buffer, format='PNG', optimize=True)
+                    image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                    images_base64.append(image_b64)
+                
+                return BatchImageResponse(
+                    images=images_base64,
+                    metadata={
+                        "prompt1": request.prompt1,
+                        "prompt2": request.prompt2,
+                        "batch_size": request.batch_size,
+                        "output_format": request.output_format,
+                        "generation_method": "interpolated_embeddings"
+                    }
+                )
+        except Exception as e:
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(e))
     
     return app

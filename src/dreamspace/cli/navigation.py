@@ -63,6 +63,17 @@ Examples:
         help="Initial prompt for image generation"
     )
     
+    # Interpolated embeddings mode
+    parser.add_argument(
+        "--prompt2", type=str, 
+        help="Second prompt for interpolated embeddings mode (enables interpolation between prompt and prompt2)"
+    )
+    
+    parser.add_argument(
+        "--interpolation-mode", action="store_true",
+        help="Enable interpolated embeddings mode (requires --prompt2)"
+    )
+    
     # Animation settings
     parser.add_argument(
         "--fps", type=int, default=8, choices=[4, 8, 12, 16, 24],

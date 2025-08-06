@@ -48,6 +48,7 @@ import threading
 import random
 from typing import List, Optional, Tuple
 from PIL import Image
+from screeninfo import get_monitors
 
 # Import from the main dreamspace library
 from dreamspace.core.animation import HeartbeatRhythm, BreathingRhythm, WaveRhythm
@@ -68,7 +69,7 @@ class DreamspaceNavigator:
     
     def __init__(self, server_url: str, initial_prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, 
                  noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg",
-                 maximize_window: bool = False):
+                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None):
         self.server_url = server_url
         self.original_image_width, self.original_image_height = image_size
         self.batch_size = batch_size
@@ -77,6 +78,8 @@ class DreamspaceNavigator:
         self.bifurcation_step = bifurcation_step
         self.output_format = output_format
         self.maximize_window = maximize_window
+        self.interpolation_mode = interpolation_mode
+        self.prompt2 = prompt2
         
         # Initialize pygame
         pygame.init()
@@ -84,44 +87,30 @@ class DreamspaceNavigator:
         
         # Calculate optimal window and display sizes
         if self.maximize_window:
-            # Get screen dimensions - try multiple methods for accuracy
-            import subprocess
             try:
-                # Try to get actual screen resolution from xrandr
-                result = subprocess.run(['xrandr'], capture_output=True, text=True)
-                for line in result.stdout.split('\n'):
-                    if 'connected primary' in line or (' connected ' in line and 'primary' in line):
-                        # Parse resolution from lines like "3664x2290+0+0"
-                        parts = line.split()
-                        for part in parts:
-                            if 'x' in part and '+' in part:
-                                resolution = part.split('+')[0]
-                                if 'x' in resolution:
-                                    w, h = resolution.split('x')
-                                    screen_width, screen_height = int(w), int(h)
-                                    print(f"🔍 Using xrandr resolution: {screen_width}x{screen_height}")
-                                    break
-                        break
-                else:
-                    raise Exception("No connected display found in xrandr")
-            except:
+                # Use screeninfo to get the actual screen resolution
+                monitor = get_monitors()[0]  # Get the primary monitor
+                screen_width, screen_height = monitor.width, monitor.height
+                print(f"🔍 Using screeninfo resolution: {screen_width}x{screen_height}")
+            except Exception as e:
+                print(f"❌ Failed to get resolution with screeninfo: {e}")
                 # Fallback to pygame detection
                 info = pygame.display.Info()
                 screen_width, screen_height = info.current_w, info.current_h
                 print(f"🔍 Using pygame resolution (fallback): {screen_width}x{screen_height}")
-            
+
             # Use full screen dimensions for window
             self.window_width = screen_width
             self.window_height = screen_height
-            
+
             # Keep original generation size - don't scale up generation!
             self.image_width = self.original_image_width
             self.image_height = self.original_image_height
-            
+
             # Calculate display scale factor for reference
             display_scale = max(self.window_width / self.image_width, 
-                              self.window_height / self.image_height)
-            
+                                self.window_height / self.image_height)
+
             print(f"🖥️ Screen size: {screen_width}x{screen_height}")
             print(f"🎨 Generation size: {self.image_width}x{self.image_height} (unchanged)")
             print(f"🪟 Window size: {self.window_width}x{self.window_height} (fullscreen)")
@@ -149,7 +138,7 @@ class DreamspaceNavigator:
         
         # Animation state
         self.animation_enabled = True
-        self.animation_speed = 8  # FPS
+        self.animation_speed = 16  # FPS
         
         # Generation parameters
         self.generation_params = {
@@ -234,17 +223,32 @@ class DreamspaceNavigator:
     
     def generate_initial_batch(self):
         """Generate the initial animation batch."""
-        print(f"🎬 Generating initial animation batch ({self.batch_size} frames)...")
+        if self.interpolation_mode and self.prompt2:
+            print(f"🌈 Generating initial interpolated animation batch ({self.batch_size} frames)...")
+            print(f"   '{self.initial_prompt}' → '{self.prompt2}'")
+        else:
+            print(f"🎬 Generating initial animation batch ({self.batch_size} frames)...")
         
         def generate_initial():
             start_time = time.time()
             print(f"⏰ Initial batch start time: {time.strftime('%H:%M:%S', time.localtime(start_time))}")
             
-            self.img_gen.generate_animation_batch(
-                batch_size=self.batch_size, 
-                request_id="initial", 
-                **self.generation_params
-            )
+            if self.interpolation_mode and self.prompt2:
+                # Use interpolated embeddings generation
+                self.img_gen.generate_interpolated_animation_batch(
+                    prompt1=self.initial_prompt,
+                    prompt2=self.prompt2,
+                    batch_size=self.batch_size, 
+                    request_id="initial", 
+                    **self.generation_params
+                )
+            else:
+                # Use regular bifurcated wiggle generation
+                self.img_gen.generate_animation_batch(
+                    batch_size=self.batch_size, 
+                    request_id="initial", 
+                    **self.generation_params
+                )
             
             end_time = time.time()
             duration = end_time - start_time
@@ -401,6 +405,25 @@ class DreamspaceNavigator:
         """Get current status information from the animation system."""
         return self.img_gen.get_status()
     
+    def generate_interpolated_animation(self, prompt1: str, prompt2: str):
+        """Generate an animated interpolation between two prompts."""
+        print(f"🎬 Generating interpolated animation: '{prompt1}' → '{prompt2}'")
+
+        # Generate interpolated embeddings
+        interpolated_embeddings = self.img_gen.generate_interpolated_embeddings(
+            prompt1, prompt2, self.batch_size
+        )
+
+        # Generate images for each interpolated embedding
+        images = []
+        for idx, embedding in enumerate(interpolated_embeddings):
+            print(f"🖼️ Generating image {idx + 1}/{len(interpolated_embeddings)}")
+            image = self.img_gen.generate_image_from_embedding(embedding)
+            images.append(image)
+
+        print(f"✅ Interpolated animation generated successfully")
+        return images
+    
     def run(self):
         """Main application loop."""
         # Generate initial batch
@@ -509,13 +532,21 @@ def main_with_args():
     """Main function using command line arguments."""
     args = parse_arguments()
     
+    # Check for interpolation mode
+    interpolation_mode = getattr(args, 'interpolation_mode', False) or getattr(args, 'prompt2', None) is not None
+    prompt2 = getattr(args, 'prompt2', None)
+    
+    if interpolation_mode and not prompt2:
+        print("❌ Interpolation mode requires --prompt2 to be specified")
+        return
+    
     # Get configuration from args
     server_url = args.server
     image_size = get_image_dimensions(args)
     batch_size = 2
     initial_prompt = args.prompt
     
-    # Bifurcated wiggle is now the default method
+    # Bifurcated wiggle is now the default method (ignored in interpolation mode)
     bifurcation_step = 3
     
     # Get output format if available, default to png for better quality
@@ -532,7 +563,9 @@ def main_with_args():
         noise_magnitude=args.noise_magnitude,
         bifurcation_step=bifurcation_step,
         output_format=output_format,
-        maximize_window=maximize_window
+        maximize_window=maximize_window,
+        interpolation_mode=interpolation_mode,
+        prompt2=prompt2
     )
     
     # Set initial configuration
@@ -541,12 +574,18 @@ def main_with_args():
     
     navigator.animation_speed = args.fps
     
-    # Bifurcated wiggle is always enabled (default method)
-    navigator.latent_wiggle = True
+    if interpolation_mode:
+        print(f"🌈 Interpolated Embeddings Mode Enabled")
+        print(f"🔢 Prompt 1: {initial_prompt}")
+        print(f"🔢 Prompt 2: {prompt2}")
+        print(f"📊 Interpolation Steps: {batch_size}")
+    else:
+        # Bifurcated wiggle is always enabled (default method)
+        navigator.latent_wiggle = True
+        print(f"✨ Bifurcated Latent Wiggle Pipeline Enabled (default method)")
+        print(f"🔧 Noise Magnitude: {navigator.noise_magnitude}")
+        print(f"🔀 Bifurcation Step: {navigator.bifurcation_step}")
     
-    print(f"✨ Bifurcated Latent Wiggle Pipeline Enabled (default method)")
-    print(f"🔧 Noise Magnitude: {navigator.noise_magnitude}")
-    print(f"🔀 Bifurcation Step: {navigator.bifurcation_step}")
     print(f"📄 Output Format: {navigator.output_format}")
     
     navigator.run()

@@ -52,23 +52,27 @@ class HeartbeatRhythm(RhythmModulator):
 class BreathingRhythm(RhythmModulator):
     """Breathing-like rhythm with slow inhale/exhale cycles."""
     
-    def __init__(self, base_period: float = 8.0, variation: float = 0.15):
+    def __init__(self, base_period: float = 16.0, variation: float = 0.15, smoothness: float = 2.0):
         self.base_period = base_period
         self.variation = variation
+        self.smoothness = smoothness  # Controls how smooth the breathing curve is
         self.phase = 0.0  # 0-1 breathing cycle
         
     def next_interval(self) -> float:
-        # Sinusoidal breathing pattern
+        # Smooth sinusoidal breathing pattern (no abs() to avoid sudden changes)
         breath_intensity = math.sin(self.phase * 2 * math.pi)
-        # Map to interval (longer transitions for smoother breathing feel)
-        base_interval = 1.5 + 2.0 * abs(breath_intensity)
         
-        # Add variation
-        variation_factor = 1.0 + random.uniform(-self.variation, self.variation)
+        # Map to interval with smoother transitions
+        # Use a gentler curve that doesn't have sudden direction changes
+        normalized_intensity = (breath_intensity + 1.0) / 2.0  # Convert from [-1,1] to [0,1]
+        base_interval = 1.0 + self.smoothness * normalized_intensity
+        
+        # Add minimal variation to keep it smooth
+        variation_factor = 1.0 + random.uniform(-self.variation, self.variation) * 0.5  # Reduced variation
         interval = base_interval * variation_factor
         
-        # Advance phase
-        self.phase = (self.phase + 0.08) % 1.0  # Slower phase progression
+        # Advance phase more smoothly
+        self.phase = (self.phase + 0.04) % 1.0  # Even slower phase progression for smoother breathing
         
         return interval
 
@@ -76,28 +80,36 @@ class BreathingRhythm(RhythmModulator):
 class WaveRhythm(RhythmModulator):
     """Ocean wave-like rhythm with irregular intervals."""
     
-    def __init__(self, base_interval: float = 2.5, chaos: float = 0.4):
+    def __init__(self, base_interval: float = 2.5, chaos: float = 0.4, wave_smoothness: float = 0.8):
         self.base_interval = base_interval
         self.chaos = chaos
+        self.wave_smoothness = wave_smoothness  # Controls how smooth wave transitions are
         self.wave_phase = 0.0
+        self.last_interval = base_interval  # Track last interval for smoothing
         
     def next_interval(self) -> float:
         # Multiple overlapping sine waves for natural irregularity
-        wave1 = math.sin(self.wave_phase * 1.3)
-        wave2 = math.sin(self.wave_phase * 2.7) * 0.5
-        wave3 = math.sin(self.wave_phase * 0.8) * 0.3
+        wave1 = math.sin(self.wave_phase * 0.7)  # Slower primary wave
+        wave2 = math.sin(self.wave_phase * 1.3) * 0.4  # Reduced amplitude
+        wave3 = math.sin(self.wave_phase * 0.5) * 0.2  # Even smaller tertiary wave
         
         combined_wave = wave1 + wave2 + wave3
         
-        # Map to interval (longer base for smoother transitions)
-        interval = self.base_interval * (1.0 + combined_wave * self.chaos)
+        # Calculate target interval
+        target_interval = self.base_interval * (1.0 + combined_wave * self.chaos)
+        
+        # Smooth transition from last interval to target interval
+        interval = self.last_interval * self.wave_smoothness + target_interval * (1.0 - self.wave_smoothness)
         
         # Ensure positive interval with longer minimum
         interval = max(0.8, interval)
         
-        # Advance phase
-        self.wave_phase += 0.12
+        # Store for next smoothing
+        self.last_interval = interval
         
+        # Advance phase more slowly for smoother waves
+        self.wave_phase += 0.06  # Reduced from 0.12
+
         return interval
 
 
@@ -105,7 +117,7 @@ class AnimationController:
     """Controls frame animation with rhythm-based transitions and interpolation."""
     
     def __init__(self, rhythm_modulator: RhythmModulator = None):
-        self.rhythm_modulator = rhythm_modulator or HeartbeatRhythm(base_bpm=35)
+        self.rhythm_modulator = rhythm_modulator or BreathingRhythm(base_period=32)
         self.last_transition_time = time.time()
         self.interpolation_enabled = True
         self._current_interval: Optional[float] = None
