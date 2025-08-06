@@ -322,13 +322,16 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         # Handle output format processing
         if output_format == "tensor":
             # For tensor format: keep as PyTorch tensor, just normalize to [0,1]
+            normalize_start = time.time()
             images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+            normalize_time = time.time() - normalize_start
             print(f"🚀 Keeping tensor format for ultra-fast serialization")
             
             decode_time = time.time() - decode_start
             print(f"🎨 Total VAE decoding (tensor format) completed in {decode_time:.3f}s")
             print(f"   🔮 VAE decode: {vae_time:.3f}s ({vae_time/decode_time*100:.1f}%)")
-            print(f"   ⚡ Tensor normalization: {decode_time-vae_time:.3f}s ({(decode_time-vae_time)/decode_time*100:.1f}%)")
+            print(f"   ⚡ Tensor normalization: {normalize_time:.3f}s ({normalize_time/decode_time*100:.1f}%)")
+            print(f"   📊 Other operations: {decode_time-vae_time-normalize_time:.3f}s ({(decode_time-vae_time-normalize_time)/decode_time*100:.1f}%)")
         else:
             # For other formats: convert to numpy then PIL
             tensor_convert_start = time.time()
