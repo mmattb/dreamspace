@@ -235,7 +235,7 @@ class DreamspaceNavigator:
             
             if self.interpolation_mode and self.prompt2:
                 # Use interpolated embeddings generation
-                self.img_gen.generate_interpolated_animation_batch(
+                self.img_gen.generate_interpolated_embeddings(
                     prompt1=self.initial_prompt,
                     prompt2=self.prompt2,
                     batch_size=self.batch_size, 
