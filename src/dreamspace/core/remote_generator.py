@@ -33,6 +33,12 @@ class AnimatedRemoteImgGen:
         self.is_generating = False
         self.current_request_id: Optional[str] = None
         self.cancel_current_request = False
+        self.is_interpolated_sequence = False  # Track if current batch is interpolated embeddings
+        
+        # Continuous animation state for interpolated sequences
+        self.continuous_progress = 0.0  # Progress through ping-pong sequence (0.0 to 1.0)
+        self.continuous_speed = 3.0  # Speed multiplier for continuous motion
+        self.last_continuous_update = time.time()
         
         # Animation components
         self.animation_controller = AnimationController()
@@ -60,10 +66,21 @@ class AnimatedRemoteImgGen:
         if not self.current_frames:
             return
         
-        self.frame_order = list(range(len(self.current_frames)))
-        random.shuffle(self.frame_order)
-        self.frame_index = 0
-        print(f"🎲 Randomized frame order: {len(self.frame_order)} frames")
+        # Check if this is an interpolated embedding sequence
+        if hasattr(self, 'is_interpolated_sequence') and self.is_interpolated_sequence:
+            # For interpolated embeddings, use ping-pong pattern: 0,1,2,3,2,1,0,1,2,3,2,1...
+            num_frames = len(self.current_frames)
+            forward_sequence = list(range(num_frames))
+            backward_sequence = list(range(num_frames - 2, 0, -1))  # Exclude first and last to avoid duplication
+            self.frame_order = forward_sequence + backward_sequence
+            self.frame_index = 0
+            print(f"🔄 Ping-pong frame order for interpolated embeddings: {self.frame_order}")
+        else:
+            # Default: randomized order for regular wiggle variations
+            self.frame_order = list(range(len(self.current_frames)))
+            random.shuffle(self.frame_order)
+            self.frame_index = 0
+            print(f"🎲 Randomized frame order: {len(self.frame_order)} frames")
     
     def generate_animation_batch(self, prompt: str = None, batch_size: int = 32, 
                                request_id: str = None, **kwargs) -> List[Image.Image]:
@@ -189,6 +206,10 @@ class AnimatedRemoteImgGen:
             # Update to new batch
             self.current_frames = frames
             self.frame_index = 0
+            
+            # Mark this as NOT an interpolated sequence (regular wiggle)
+            self.is_interpolated_sequence = False
+            
             self._create_randomized_order()
             
             elapsed = time.time() - start_time
@@ -320,6 +341,10 @@ class AnimatedRemoteImgGen:
             # Update to new batch
             self.current_frames = frames
             self.frame_index = 0
+            
+            # Mark this as an interpolated sequence for ping-pong animation
+            self.is_interpolated_sequence = True
+            
             self._create_randomized_order()
             
             elapsed = time.time() - start_time
@@ -341,7 +366,7 @@ class AnimatedRemoteImgGen:
             print(f"🛑 Cancelling current generation request")
     
     def get_current_frame(self) -> Optional[Image.Image]:
-        """Get the current animation frame with optional interpolation."""
+        """Get the current animation frame with smooth interpolation."""
         if not self.current_frames or not self.frame_order:
             return None
         
@@ -350,7 +375,11 @@ class AnimatedRemoteImgGen:
         if transition_frame is not None:
             return transition_frame
         
-        # Normal frame transitions - advance frame if needed
+        # For interpolated sequences, use continuous motion through ping-pong
+        if self.is_interpolated_sequence:
+            return self._get_continuous_frame()
+        
+        # Regular frame transitions for wiggle sequences
         if self.animation_controller.should_advance_frame():
             self._advance_to_next_frame()
         
@@ -366,10 +395,56 @@ class AnimatedRemoteImgGen:
         
         # Calculate interpolation progress within the transition interval
         progress = self.animation_controller.get_transition_progress()
-        smooth_progress = self.animation_controller.smooth_progress(progress, "smooth")
+        smooth_progress = self.animation_controller.smooth_progress(progress, "linear")  # Use linear for smoother motion
         
         # Return interpolated frame with full transition for seamless animation
         return self.animation_controller.interpolate_frames(current_frame, next_frame, smooth_progress)
+    
+    def _get_continuous_frame(self) -> Image.Image:
+        """Get frame using continuous motion through the ping-pong sequence."""
+        current_time = time.time()
+        delta_time = current_time - self.last_continuous_update
+        self.last_continuous_update = current_time
+        
+        # Update continuous progress
+        speed_factor = self.continuous_speed * 0.03  # Scale speed appropriately
+        self.continuous_progress += delta_time * speed_factor
+        self.continuous_progress = self.continuous_progress % 1.0  # Keep in [0, 1] range
+        
+        # Map progress to ping-pong sequence
+        num_frames = len(self.current_frames)
+        if num_frames < 2:
+            return self.current_frames[0]
+        
+        # Create ping-pong pattern: 0->1->2->...->n->...->2->1->0->1->...
+        # Total sequence length is (num_frames-1)*2 steps
+        total_steps = (num_frames - 1) * 2
+        current_step = self.continuous_progress * total_steps
+        
+        if current_step <= (num_frames - 1):
+            # Forward direction: 0 -> 1 -> 2 -> ... -> (num_frames-1)
+            frame_pos = current_step
+        else:
+            # Backward direction: (num_frames-1) -> ... -> 2 -> 1 -> 0
+            frame_pos = total_steps - current_step
+        
+        # Get integer frame indices and interpolation alpha
+        frame_idx = int(frame_pos)
+        alpha = frame_pos - frame_idx
+        
+        # Clamp indices
+        frame_idx = max(0, min(frame_idx, num_frames - 1))
+        next_frame_idx = max(0, min(frame_idx + 1, num_frames - 1))
+        
+        # Get frames
+        current_frame = self.current_frames[frame_idx]
+        next_frame = self.current_frames[next_frame_idx]
+        
+        # Interpolate between frames for smooth motion
+        if frame_idx == next_frame_idx or not self.animation_controller.interpolation_enabled:
+            return current_frame
+        
+        return self.animation_controller.interpolate_frames(current_frame, next_frame, alpha)
     
     def _advance_to_next_frame(self):
         """Advance to the next frame in the randomized sequence."""
