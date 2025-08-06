@@ -131,39 +131,46 @@ class AnimatedRemoteImgGen:
             
             # Convert all images to PIL Images (handle different formats)
             frames = []
-            for i, image_data in enumerate(result["images"]):
-                # Check for cancellation during decoding
-                if self.cancel_current_request or self.current_request_id != request_id:
-                    print(f"❌ Request {request_id[:8]} cancelled during decoding at frame {i+1}")
-                    return []
-                
-                if server_format == "tensor":
-                    # Deserialize tensor data using torch.load
+            
+            if server_format == "tensor":
+                # Special handling for tensor format - single tensor contains all images
+                if len(result["images"]) > 0:
                     import torch
                     from io import BytesIO
                     
-                    tensor_bytes = base64.b64decode(image_data)
+                    tensor_bytes = base64.b64decode(result["images"][0])  # Single tensor for whole batch
                     buffer = BytesIO(tensor_bytes)
-                    tensor_data = torch.load(buffer, map_location='cpu')
+                    tensor_batch = torch.load(buffer, map_location='cpu')
                     
-                    # Convert tensor to numpy array
-                    if isinstance(tensor_data, torch.Tensor):
-                        tensor_array = tensor_data.numpy()
-                    else:
-                        tensor_array = tensor_data
+                    # tensor_batch should be shape (B, C, H, W)
+                    for i in range(tensor_batch.shape[0]):
+                        # Check for cancellation during decoding
+                        if self.cancel_current_request or self.current_request_id != request_id:
+                            print(f"❌ Request {request_id[:8]} cancelled during tensor decoding at frame {i+1}")
+                            return []
+                        
+                        # Extract individual image: (C, H, W) -> (H, W, C)
+                        image_tensor = tensor_batch[i].permute(1, 2, 0)
+                        image_array = image_tensor.numpy()
+                        
+                        # Convert to PIL Image (values should be in [0,1] range)
+                        if image_array.dtype != np.uint8:
+                            image_array = (image_array * 255).astype(np.uint8)
+                        
+                        image = Image.fromarray(image_array, mode='RGB')
+                        frames.append(image)
+            else:
+                # Handle traditional base64-encoded images (jpeg, png, etc.)
+                for i, image_data in enumerate(result["images"]):
+                    # Check for cancellation during decoding
+                    if self.cancel_current_request or self.current_request_id != request_id:
+                        print(f"❌ Request {request_id[:8]} cancelled during decoding at frame {i+1}")
+                        return []
                     
-                    # Convert tensor to PIL Image
-                    # Tensor should be in format (H, W, C) with values 0-255
-                    if tensor_array.dtype != np.uint8:
-                        tensor_array = (tensor_array * 255).astype(np.uint8)
-                    
-                    image = Image.fromarray(tensor_array, mode='RGB')
-                else:
                     # Handle as base64-encoded image (jpeg, png, etc.)
                     image_bytes = base64.b64decode(image_data)
                     image = Image.open(BytesIO(image_bytes))
-                
-                frames.append(image)
+                    frames.append(image)
             
             # Final check before updating frames
             if self.cancel_current_request or self.current_request_id != request_id:

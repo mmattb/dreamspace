@@ -17,8 +17,8 @@ Usage:
     # Run with command line arguments
     PYTHONPATH=src python examples/animated_navigation.py --size 512 --batch-size 8
     
-    # Run with custom server and bifurcated wiggle
-    PYTHONPATH=src python examples/animated_navigation.py --server http://localhost:8001 --bifurcated-wiggle
+    # Run with custom server (bifurcated wiggle is now the default)
+    PYTHONPATH=src python examples/animated_navigation.py --server http://localhost:8001
     
     # Run with tensor output format for maximum speed
     PYTHONPATH=src python examples/animated_navigation.py --output-format tensor
@@ -428,10 +428,8 @@ def main_with_args():
     batch_size = args.batch_size
     initial_prompt = args.prompt
     
-    # Handle bifurcated wiggle flag
+    # Bifurcated wiggle is now the default method
     bifurcation_step = args.bifurcation_step
-    if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
-        bifurcation_step = max(bifurcation_step, 3)  # Ensure minimum of 3
     
     # Get output format if available, default to jpeg
     output_format = getattr(args, 'output_format', 'jpeg')
@@ -452,18 +450,12 @@ def main_with_args():
     
     navigator.animation_speed = args.fps
     
-    # Set latent wiggle flag
-    navigator.latent_wiggle = args.latent_wiggle
-    if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
-        navigator.latent_wiggle = True  # Imply latent wiggle is enabled
-
-    if navigator.latent_wiggle:
-        method_name = "Bifurcated Latent Wiggle" if navigator.bifurcation_step > 0 else "Latent Wiggle"
-        print(f"✨ {method_name} Pipeline Enabled")
-        print(f"🔧 Noise Magnitude: {navigator.noise_magnitude}")
-        if navigator.bifurcation_step > 0:
-            print(f"🔀 Bifurcation Step: {navigator.bifurcation_step}")
+    # Bifurcated wiggle is always enabled (default method)
+    navigator.latent_wiggle = True
     
+    print(f"✨ Bifurcated Latent Wiggle Pipeline Enabled (default method)")
+    print(f"🔧 Noise Magnitude: {navigator.noise_magnitude}")
+    print(f"🔀 Bifurcation Step: {navigator.bifurcation_step}")
     print(f"📄 Output Format: {navigator.output_format}")
     
     navigator.run()

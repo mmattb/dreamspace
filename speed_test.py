@@ -87,17 +87,7 @@ Examples:
         help="Initial prompt for image generation"
     )
     
-    # Latent wiggle options
-    parser.add_argument(
-        "--latent-wiggle", action="store_true",
-        help="Enable latent wiggle pipeline (skips img2img pipeline)"
-    )
-
-    parser.add_argument(
-        "--bifurcated-wiggle", action="store_true",
-        help="Use bifurcated wiggle method (improved manifold adherence)"
-    )
-
+    # Generation options (bifurcated wiggle is now the default method)
     parser.add_argument(
         "--noise-magnitude", type=float, default=0.3,
         help="Magnitude of noise for latent wiggle variations (default: 0.3)"
@@ -295,10 +285,8 @@ def main():
         size = args.size
         image_size = (size, size)
     
-    # Handle bifurcated wiggle flag
+    # Bifurcated wiggle is now the default method
     bifurcation_step = args.bifurcation_step
-    if hasattr(args, 'bifurcated_wiggle') and args.bifurcated_wiggle:
-        bifurcation_step = max(bifurcation_step, 3)  # Ensure minimum of 3
 
     # Create speed tester
     tester = SpeedTester(

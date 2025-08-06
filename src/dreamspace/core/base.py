@@ -3,15 +3,14 @@
 import torch
 from abc import ABC, abstractmethod
 from typing import Dict, Any
-from PIL import Image
 
 
 class ImgGenBackend(ABC):
     """Abstract backend for different image generation models.
     
     This abstract base class defines the interface that all image generation backends
-    must implement. It supports text-to-image generation, image-to-image transformation,
-    and semantic embedding interpolation for smooth transitions between concepts.
+    must implement. It supports text-to-image generation with latent space wiggle
+    variations and semantic embedding interpolation for smooth transitions between concepts.
     
     Implementations should handle model-specific details like loading pipelines,
     managing embeddings, and optimizing performance for their respective models
@@ -29,31 +28,9 @@ class ImgGenBackend(ABC):
         
         Returns:
             Dict containing:
-                - 'image': PIL.Image.Image - The generated image
+                - 'image': PIL.Image.Image or PyTorch tensor - The generated image
                 - 'latents': Optional tensor - Latent space representation
                 - 'embeddings': Optional tensor - Text/image embeddings for interpolation
-        """
-        pass
-    
-    @abstractmethod
-    def img2img(self, image: Image.Image, prompt: str, strength: float = 0.5, **kwargs) -> Dict[str, Any]:
-        """Transform an existing image using a text prompt.
-        
-        This method enables visual continuity by using an existing image as a starting
-        point and applying transformations based on the prompt. Lower strength values
-        preserve more of the original image structure.
-        
-        Args:
-            image: Source PIL Image to transform
-            prompt: Text description guiding the transformation
-            strength: Float 0.0-1.0, how much to change the image (0.0=no change, 1.0=complete transformation)
-            **kwargs: Model-specific parameters
-        
-        Returns:
-            Dict containing:
-                - 'image': PIL.Image.Image - The transformed image
-                - 'latents': Optional tensor - Latent space representation  
-                - 'embeddings': Optional tensor - Text/image embeddings
         """
         pass
     
