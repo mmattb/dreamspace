@@ -1,10 +1,13 @@
 """Stable Diffusion 1.5 server backend."""
 
+import time
+
 import torch
 from typing import Dict, Any, Optional
 from PIL import Image
 
 from ...core.base import ImgGenBackend
+from ...core.utils import no_grad_method
 from ...config.settings import Config, ModelConfig
 
 
@@ -152,6 +155,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             **kwargs
         )
     
+    @no_grad_method
     def generate_batch_with_bifurcated_wiggle(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, output_format: str = "pil", **kwargs) -> Dict[str, Any]:
         """Generate a batch of images with bifurcated latent wiggle variations.
         
@@ -165,8 +169,6 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             bifurcation_step: Number of steps from the end when to add noise and bifurcate
                             (e.g., 5 means bifurcate 5 steps before completion)
         """
-        import time
-        
         total_start = time.time()
         print(f"🔀 Starting bifurcated wiggle: {batch_size} variations, noise={noise_magnitude}, bifurcation={bifurcation_step}")
         
@@ -319,12 +321,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         vae_time = time.time() - vae_start
         print(f"🔮 VAE decode completed in {vae_time:.3f}s")
         
+        images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+
         # Handle output format processing
         if output_format == "tensor":
             # For tensor format: keep as PyTorch tensor, just normalize to [0,1]
             normalize_start = time.time()
-            with torch.no_grad():
-                images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
             normalize_time = time.time() - normalize_start
             print(f"🚀 Keeping tensor format for ultra-fast serialization")
             print(f"⚡ Tensor normalization completed in {normalize_time:.6f}s")
@@ -337,14 +339,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         else:
             # For other formats: convert to numpy then PIL
             tensor_convert_start = time.time()
-            images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
             images = images.cpu().permute(0, 2, 3, 1).float().numpy()  # BCHW -> BHWC and to numpy
             tensor_convert_time = time.time() - tensor_convert_start
             print(f"🔄 Tensor→numpy conversion completed in {tensor_convert_time:.3f}s")
             
             # Convert to PIL Images for other formats
             pil_start = time.time()
-            from PIL import Image
             pil_images = []
             for i in range(images.shape[0]):
                 image_array = (images[i] * 255).astype('uint8')  # Convert to 0-255 range

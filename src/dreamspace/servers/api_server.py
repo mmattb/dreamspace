@@ -419,10 +419,10 @@ def create_app(backend_type: str = "kandinsky_local",
                 print("📦 Encoding images to JPEG...")
                 encoding_start = time.time()
 
-            def encode_single_image(args):
-                from io import BytesIO  # Import inside function to avoid scope issues
-                import base64
-                import time
+                def encode_single_image(args):
+                    from io import BytesIO  # Import inside function to avoid scope issues
+                    import base64
+                    import time
                 i, image = args
                 
                 # Time the JPEG encoding
@@ -459,69 +459,69 @@ def create_app(backend_type: str = "kandinsky_local",
                     image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
                     b64_time = time.time() - b64_start
                 
-                return i, image_b64, buffer_size, jpeg_time, b64_time
+                    return i, image_b64, buffer_size, jpeg_time, b64_time
 
-            # Use ThreadPoolExecutor for parallel encoding if we have many images
-            if len(all_images) > 8:
-                from concurrent.futures import ThreadPoolExecutor
+                # Use ThreadPoolExecutor for parallel encoding if we have many images
+                if len(all_images) > 8:
+                    from concurrent.futures import ThreadPoolExecutor
 
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    results = list(executor.map(encode_single_image, enumerate(all_images)))
+                    with ThreadPoolExecutor(max_workers=4) as executor:
+                        results = list(executor.map(encode_single_image, enumerate(all_images)))
 
-                # Sort results by original index and extract data
-                results.sort(key=lambda x: x[0])
-                image_b64_list = [r[1] for r in results]
-                total_size = sum(r[2] for r in results)
-                total_jpeg_time = sum(r[3] for r in results)
-                total_b64_time = sum(r[4] for r in results)
+                    # Sort results by original index and extract data
+                    results.sort(key=lambda x: x[0])
+                    image_b64_list = [r[1] for r in results]
+                    total_size = sum(r[2] for r in results)
+                    total_jpeg_time = sum(r[3] for r in results)
+                    total_b64_time = sum(r[4] for r in results)
 
-                print(f"  Parallel encoded {len(all_images)} images")
-                print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
-                print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
-            else:
-                # Sequential encoding for smaller batches
-                image_b64_list = []
-                total_size = 0
-                total_jpeg_time = 0
-                total_b64_time = 0
+                    print(f"  Parallel encoded {len(all_images)} images")
+                    print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
+                    print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
+                else:
+                    # Sequential encoding for smaller batches
+                    image_b64_list = []
+                    total_size = 0
+                    total_jpeg_time = 0
+                    total_b64_time = 0
 
-                for i, image in enumerate(all_images):
-                    _, image_b64, buffer_size, jpeg_time, b64_time = encode_single_image((i, image))
-                    image_b64_list.append(image_b64)
-                    total_size += buffer_size
-                    total_jpeg_time += jpeg_time
-                    total_b64_time += b64_time
+                    for i, image in enumerate(all_images):
+                        _, image_b64, buffer_size, jpeg_time, b64_time = encode_single_image((i, image))
+                        image_b64_list.append(image_b64)
+                        total_size += buffer_size
+                        total_jpeg_time += jpeg_time
+                        total_b64_time += b64_time
 
-                print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
-                print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
+                    print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
+                    print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
 
-            encoding_time = time.time() - encoding_start
-            avg_size = total_size / len(all_images) if all_images else 0
-            print(f"📦 Encoding complete in {encoding_time:.1f}s - Total: {total_size/1024/1024:.1f}MB, Avg: {avg_size/1024:.1f}KB per image")
+                encoding_time = time.time() - encoding_start
+                avg_size = total_size / len(all_images) if all_images else 0
+                print(f"📦 Encoding complete in {encoding_time:.1f}s - Total: {total_size/1024/1024:.1f}MB, Avg: {avg_size/1024:.1f}KB per image")
 
-            elapsed = time.time() - start_time
-            avg_time = elapsed / len(all_images) if all_images else 0
+                elapsed = time.time() - start_time
+                avg_time = elapsed / len(all_images) if all_images else 0
 
-            return BatchImageResponse(
-                images=image_b64_list,
-                metadata={
-                    "prompt": request.prompt,
-                    "parameters": gen_params,
-                    "batch_size": len(image_b64_list),
-                    "animation_ready": True,
-                    "generation_time": time.time() - start_time,
-                    "generation_method": "bifurcated_wiggle",
-                    "multi_gpu": False,  # Using single GPU with batch generation
-                    "gpu_count": 1,
-                    "seed": request.seed,
-                    "base_seed": base_seed,
-                    "variation_method": "latent_noise",
-                    "output_format": request.output_format or "jpeg",
-                    "encoding_time": encoding_time,
-                    "noise_magnitude": request.noise_magnitude,
-                    "bifurcation_step": request.bifurcation_step
-                }
-            )
+                return BatchImageResponse(
+                    images=image_b64_list,
+                    metadata={
+                        "prompt": request.prompt,
+                        "parameters": gen_params,
+                        "batch_size": len(image_b64_list),
+                        "animation_ready": True,
+                        "generation_time": time.time() - start_time,
+                        "generation_method": "bifurcated_wiggle",
+                        "multi_gpu": False,  # Using single GPU with batch generation
+                        "gpu_count": 1,
+                        "seed": request.seed,
+                        "base_seed": base_seed,
+                        "variation_method": "latent_noise",
+                        "output_format": request.output_format or "jpeg",
+                        "encoding_time": encoding_time,
+                        "noise_magnitude": request.noise_magnitude,
+                        "bifurcation_step": request.bifurcation_step
+                    }
+                )
 
         except Exception as e:
             import traceback
