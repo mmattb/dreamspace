@@ -205,43 +205,6 @@ class ImgGen:
             
             return image
     
-    def gen_img2img(self, strength: float = 0.5, prompt: Optional[str] = None, **kwargs) -> Image.Image:
-        """Generate using img2img from the most recent image.
-        
-        Args:
-            strength: How much to transform the image (0.0=no change, 1.0=complete change)
-            prompt: Text description to guide the transformation
-            **kwargs: Additional generation parameters
-            
-        Returns:
-            Transformed PIL Image
-            
-        Raises:
-            ValueError: If no prompt is provided
-        """
-        if not self._recent_images:
-            return self.gen(prompt, **kwargs)  # Fall back to text2img
-        
-        use_prompt = prompt or self.prompt
-        if not use_prompt:
-            raise ValueError("No prompt provided")
-        
-        # Use most recent image as source
-        source_image = self._recent_images[-1]
-        
-        params = {**self.generation_params, **kwargs}
-        result = self.backend.img2img(source_image, use_prompt, strength, **params)
-        
-        # Register result
-        self.register(
-            result['image'], 
-            result.get('embeddings'), 
-            result.get('latents'),
-            use_prompt
-        )
-        
-        return result['image']
-    
     def set_interpolation_targets(self, prompt1: str, prompt2: str):
         """Set up interpolation between two prompts.
         
@@ -318,6 +281,43 @@ class ImgGen:
             **kwargs: Parameters to update
         """
         self.generation_params.update(kwargs)
+    
+    def gen_interpolated_embeddings(self, prompt1: str, prompt2: str, batch_size: int, **kwargs) -> List[Image.Image]:
+        """Generate a batch of images using interpolated embeddings between two prompts.
+        
+        Args:
+            prompt1: The starting text prompt
+            prompt2: The ending text prompt  
+            batch_size: Number of interpolation steps (including start and end)
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            List of PIL Images representing the interpolation sequence
+        """
+        # Merge generation parameters
+        params = {**self.generation_params, **kwargs}
+        
+        # Call backend method
+        result = self.backend.generate_interpolated_embeddings(
+            prompt1=prompt1,
+            prompt2=prompt2, 
+            batch_size=batch_size,
+            **params
+        )
+        
+        # Extract images from result
+        images = result['images'] if isinstance(result['images'], list) else [result['images']]
+        
+        # Register the first image for continuity
+        if images:
+            self.register(
+                images[0],
+                result.get('embeddings'),
+                result.get('latents'), 
+                prompt1
+            )
+        
+        return images
     
     def clear_history(self):
         """Clear generation history."""

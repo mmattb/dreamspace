@@ -203,6 +203,137 @@ class AnimatedRemoteImgGen:
         finally:
             self.is_generating = False
     
+    def generate_interpolated_animation_batch(self, prompt1: str, prompt2: str, 
+                                            batch_size: int = 32, 
+                                            request_id: str = None, **kwargs) -> List[Image.Image]:
+        """Generate a batch of frames interpolating between two prompts."""
+        # Set up request tracking
+        if request_id is None:
+            request_id = str(time.time())
+        
+        self.current_request_id = request_id
+        self.cancel_current_request = False
+        
+        request_data = {
+            "prompt1": prompt1,
+            "prompt2": prompt2,
+            "batch_size": batch_size,
+            "width": kwargs.get("width", 512),
+            "height": kwargs.get("height", 512),
+            "num_inference_steps": kwargs.get("num_inference_steps", 20),
+            "guidance_scale": kwargs.get("guidance_scale", 7.5),
+            "seed": kwargs.get("seed", 42),
+            "output_format": kwargs.get("output_format", "jpeg")
+        }
+        
+        print(f"🎬 Generating {batch_size} interpolated frames [{request_id[:8]}]:")
+        print(f"   From: '{prompt1[:50]}...'")
+        print(f"   To: '{prompt2[:50]}...'")
+        start_time = time.time()
+        
+        try:
+            self.is_generating = True
+            
+            # Check for cancellation before making request
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled before starting")
+                return []
+            
+            print(f"📡 Sending interpolation request to server...")
+            
+            response = requests.post(
+                f"{self.server_url}/generate_interpolated_embeddings",
+                json=request_data,
+                timeout=300
+            )
+            
+            # Check for cancellation after request
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled after server response")
+                return []
+            
+            if response.status_code != 200:
+                raise Exception(f"Interpolated generation failed: {response.status_code} - {response.text}")
+            
+            result = response.json()
+            
+            # Get output format from request data or metadata
+            output_format = request_data.get("output_format", "jpeg")
+            metadata = result.get("metadata", {})
+            server_format = metadata.get("output_format", output_format)
+            
+            # Convert all images to PIL Images (handle different formats)
+            frames = []
+            
+            if server_format == "tensor":
+                # Special handling for tensor format - single tensor contains all images
+                if len(result["images"]) > 0:
+                    tensor_bytes = base64.b64decode(result["images"][0])  # Single tensor for whole batch
+                    buffer = BytesIO(tensor_bytes)
+                    tensor_batch = torch.load(buffer, map_location='cpu')
+                    
+                    # tensor_batch should be shape (B, C, H, W)
+                    for i in range(tensor_batch.shape[0]):
+                        # Check for cancellation during decoding
+                        if self.cancel_current_request or self.current_request_id != request_id:
+                            print(f"❌ Request {request_id[:8]} cancelled during tensor decoding at frame {i+1}")
+                            return []
+                        
+                        # Extract individual image: (C, H, W) -> (H, W, C)
+                        image_tensor = tensor_batch[i].permute(1, 2, 0)
+                        image_array = image_tensor.numpy()
+                        
+                        # Convert to PIL Image (values should be in [0,1] range)
+                        if image_array.dtype != np.uint8:
+                            image_array = (image_array * 255).astype(np.uint8)
+                        
+                        image = Image.fromarray(image_array, mode='RGB')
+                        frames.append(image)
+            else:
+                # Handle traditional base64-encoded images (jpeg, png, etc.)
+                for i, image_data in enumerate(result["images"]):
+                    # Check for cancellation during decoding
+                    if self.cancel_current_request or self.current_request_id != request_id:
+                        print(f"❌ Request {request_id[:8]} cancelled during decoding at frame {i+1}")
+                        return []
+                    
+                    # Handle as base64-encoded image (jpeg, png, etc.)
+                    image_bytes = base64.b64decode(image_data)
+                    image = Image.open(BytesIO(image_bytes))
+                    frames.append(image)
+            
+            # Final check before updating frames
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled before frame update")
+                return []
+            
+            # Set up cross-batch transition if we have existing frames
+            if self.current_frames and len(self.current_frames) > 0 and self.frame_order and len(self.frame_order) > 0:
+                current_idx = self.frame_order[self.frame_index]
+                old_frame = self.current_frames[current_idx]
+                new_frame = frames[0] if frames else None  # Use first frame of new batch
+                
+                if old_frame and new_frame:
+                    self.cross_batch_transition.start_transition(old_frame, new_frame)
+                    print(f"🎭 Stored old batch last frame for smooth transition")
+            
+            # Update to new batch
+            self.current_frames = frames
+            self.frame_index = 0
+            self._create_randomized_order()
+            
+            elapsed = time.time() - start_time
+            print(f"✅ Interpolated animation batch [{request_id[:8]}] completed in {elapsed:.1f}s ({elapsed/batch_size:.2f}s per frame)")
+            
+            return frames
+            
+        except Exception as e:
+            if not (self.cancel_current_request or self.current_request_id != request_id):
+                print(f"❌ Interpolated generation error [{request_id[:8]}]: {e}")
+            raise
+        finally:
+            self.is_generating = False
+
     def cancel_current_generation(self):
         """Cancel the current generation request."""
         if self.is_generating:
@@ -235,10 +366,10 @@ class AnimatedRemoteImgGen:
         
         # Calculate interpolation progress within the transition interval
         progress = self.animation_controller.get_transition_progress()
-        smooth_progress = self.animation_controller.smooth_progress(progress)
+        smooth_progress = self.animation_controller.smooth_progress(progress, "smooth")
         
-        # Return interpolated frame with stronger blending for smoother transitions
-        return self.animation_controller.interpolate_frames(current_frame, next_frame, smooth_progress * 0.7)
+        # Return interpolated frame with full transition for seamless animation
+        return self.animation_controller.interpolate_frames(current_frame, next_frame, smooth_progress)
     
     def _advance_to_next_frame(self):
         """Advance to the next frame in the randomized sequence."""

@@ -380,12 +380,17 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         # Create interpolated embeddings
         interpolated_embeddings = []
-        for alpha in torch.linspace(0, 1, steps=batch_size):
+        alphas = torch.linspace(0, 1, steps=batch_size)
+        print(f"🔍 DEBUG: Creating {batch_size} interpolation steps with alphas: {alphas}")
+        
+        for i, alpha in enumerate(alphas):
             interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
             interpolated_embeddings.append(interpolated)
+            print(f"   Step {i}: alpha={alpha:.3f}, embedding shape={interpolated.shape}")
         
         # Stack all interpolated embeddings into a batch
         batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)
+        print(f"🔍 DEBUG: Final batch_prompt_embeds shape: {batch_prompt_embeds.shape}")
         
         # Create negative embeddings for classifier-free guidance (use empty prompt)
         negative_embedding = self._extract_text_embeddings("")
@@ -493,6 +498,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
         # Return based on requested output format (same as generate())
         if output_format == "tensor":
+            print(f"🔍 DEBUG: Returning tensor format with shape: {images.shape}")
             return {
                 'images': images,  # PyTorch tensor [0,1] range, shape (batch, channels, height, width)
                 'format': 'torch_tensor',
@@ -503,6 +509,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 'embeddings': batch_prompt_embeds
             }
         elif output_format == "pil":
+            print(f"🔍 DEBUG: Returning PIL format with {len(pil_images)} images")
             return {
                 'images': pil_images,  # PIL Images
                 'format': 'pil',
@@ -511,6 +518,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             }
         else:
             # Default to PIL for now, could add other formats later
+            print(f"🔍 DEBUG: Returning default PIL format with {len(pil_images)} images")
             return {
                 'images': pil_images,  # PIL Images
                 'format': 'pil', 

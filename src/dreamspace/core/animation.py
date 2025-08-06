@@ -116,13 +116,15 @@ class WaveRhythm(RhythmModulator):
 class AnimationController:
     """Controls frame animation with rhythm-based transitions and interpolation."""
     
-    def __init__(self, rhythm_modulator: RhythmModulator = None):
+    def __init__(self, rhythm_modulator: RhythmModulator = None, default_easing: str = "smooth"):
         self.rhythm_modulator = rhythm_modulator or BreathingRhythm(base_period=32)
         self.last_transition_time = time.time()
         self.interpolation_enabled = True
+        self.default_easing = default_easing  # Default to extra smooth easing
         self._current_interval: Optional[float] = None
         
         print(f"🎵 Animation controller initialized with {self.rhythm_modulator.__class__.__name__}")
+        print(f"🎨 Default easing: {default_easing}")
     
     def set_rhythm_modulator(self, modulator: RhythmModulator):
         """Change the rhythm modulation pattern."""
@@ -170,9 +172,32 @@ class AnimationController:
         # Use PIL's blend function for smooth interpolation
         return Image.blend(frame1, frame2, alpha)
     
-    def smooth_progress(self, progress: float) -> float:
-        """Apply smooth interpolation curve (ease-in-out)."""
-        return 0.5 - 0.5 * math.cos(progress * math.pi)
+    def smooth_progress(self, progress: float, easing: str = None) -> float:
+        """Apply smooth interpolation curve with different easing options.
+        
+        Args:
+            progress: Linear progress from 0.0 to 1.0
+            easing: Type of easing curve ('ease-in-out', 'ease-in', 'ease-out', 'linear', 'smooth')
+        """
+        # Use instance default if no easing specified
+        easing = easing or self.default_easing
+        
+        # Clamp progress to [0, 1] to prevent overshooting
+        progress = max(0.0, min(1.0, progress))
+        
+        if easing == "linear":
+            return progress
+        elif easing == "ease-in":
+            return progress * progress
+        elif easing == "ease-out":
+            return 1.0 - (1.0 - progress) * (1.0 - progress)
+        elif easing == "smooth":
+            # Extra smooth S-curve using smoothstep function
+            # This ensures we reach exactly 0 at start and 1 at end
+            return progress * progress * (3.0 - 2.0 * progress)
+        else:  # "ease-in-out" (default)
+            # Standard cosine-based ease-in-out that reaches full range
+            return 0.5 - 0.5 * math.cos(progress * math.pi)
     
     def toggle_interpolation(self) -> bool:
         """Toggle image interpolation on/off."""
@@ -217,8 +242,8 @@ class CrossBatchTransition:
             print(f"🎭 Cross-batch transition completed")
             return self.new_frame
         
-        # Apply smooth interpolation
-        smooth_progress = animation_controller.smooth_progress(progress)
+        # Apply smooth interpolation with extra smooth easing
+        smooth_progress = animation_controller.smooth_progress(progress, "smooth")
         return animation_controller.interpolate_frames(self.old_frame, self.new_frame, smooth_progress)
     
     def is_active(self) -> bool:
