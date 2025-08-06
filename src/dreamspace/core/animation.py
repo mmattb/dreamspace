@@ -117,7 +117,7 @@ class AnimationController:
     """Controls frame animation with rhythm-based transitions and interpolation."""
     
     def __init__(self, rhythm_modulator: RhythmModulator = None, default_easing: str = "smooth"):
-        self.rhythm_modulator = rhythm_modulator or BreathingRhythm(base_period=32)
+        self.rhythm_modulator = rhythm_modulator or BreathingRhythm(base_period=64)
         self.last_transition_time = time.time()
         self.interpolation_enabled = True
         self.default_easing = default_easing  # Default to extra smooth easing
