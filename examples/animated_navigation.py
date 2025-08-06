@@ -9,6 +9,7 @@ Features:
 - Real-time parameter space navigation
 - Background batch generation with seamless transitions
 - Interactive keyboard controls
+- Maximized window display for full-screen viewing
 
 Usage:
     # Run with interactive prompts
@@ -16,6 +17,9 @@ Usage:
     
     # Run with command line arguments
     PYTHONPATH=src python examples/animated_navigation.py --size 512 --batch-size 8
+    
+    # Run maximized to fill screen while maintaining aspect ratio
+    PYTHONPATH=src python examples/animated_navigation.py --maximize
     
     # Run with custom server (bifurcated wiggle is now the default)
     PYTHONPATH=src python examples/animated_navigation.py --server http://localhost:8001
@@ -43,6 +47,7 @@ import time
 import threading
 import random
 from typing import List, Optional, Tuple
+from PIL import Image
 
 # Import from the main dreamspace library
 from dreamspace.core.animation import HeartbeatRhythm, BreathingRhythm, WaveRhythm
@@ -61,20 +66,74 @@ MORPHS = [
 class DreamspaceNavigator:
     """Main application controller for the animated dreamspace navigator."""
     
-    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, initial_prompt: str, 
-                 noise_magnitude: float = 0.3, bifurcation_step: int = 3, output_format: str = "jpeg"):
+    def __init__(self, server_url: str, initial_prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, 
+                 noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg",
+                 maximize_window: bool = False):
         self.server_url = server_url
-        self.image_width, self.image_height = image_size
+        self.original_image_width, self.original_image_height = image_size
         self.batch_size = batch_size
         self.initial_prompt = initial_prompt
         self.noise_magnitude = noise_magnitude
         self.bifurcation_step = bifurcation_step
         self.output_format = output_format
+        self.maximize_window = maximize_window
         
         # Initialize pygame
         pygame.init()
         pygame.font.init()
-        self.window = pygame.display.set_mode((self.image_width, self.image_height))
+        
+        # Calculate optimal window and display sizes
+        if self.maximize_window:
+            # Get screen dimensions - try multiple methods for accuracy
+            import subprocess
+            try:
+                # Try to get actual screen resolution from xrandr
+                result = subprocess.run(['xrandr'], capture_output=True, text=True)
+                for line in result.stdout.split('\n'):
+                    if 'connected primary' in line or (' connected ' in line and 'primary' in line):
+                        # Parse resolution from lines like "3664x2290+0+0"
+                        parts = line.split()
+                        for part in parts:
+                            if 'x' in part and '+' in part:
+                                resolution = part.split('+')[0]
+                                if 'x' in resolution:
+                                    w, h = resolution.split('x')
+                                    screen_width, screen_height = int(w), int(h)
+                                    print(f"🔍 Using xrandr resolution: {screen_width}x{screen_height}")
+                                    break
+                        break
+                else:
+                    raise Exception("No connected display found in xrandr")
+            except:
+                # Fallback to pygame detection
+                info = pygame.display.Info()
+                screen_width, screen_height = info.current_w, info.current_h
+                print(f"🔍 Using pygame resolution (fallback): {screen_width}x{screen_height}")
+            
+            # Use full screen dimensions for window
+            self.window_width = screen_width
+            self.window_height = screen_height
+            
+            # Keep original generation size - don't scale up generation!
+            self.image_width = self.original_image_width
+            self.image_height = self.original_image_height
+            
+            # Calculate display scale factor for reference
+            display_scale = max(self.window_width / self.image_width, 
+                              self.window_height / self.image_height)
+            
+            print(f"🖥️ Screen size: {screen_width}x{screen_height}")
+            print(f"🎨 Generation size: {self.image_width}x{self.image_height} (unchanged)")
+            print(f"🪟 Window size: {self.window_width}x{self.window_height} (fullscreen)")
+            print(f"🔍 Display scale: {display_scale:.2f}x (images will be scaled up for display)")
+            
+        else:
+            # Use original size for both window and generation
+            self.window_width = self.image_width = self.original_image_width
+            self.window_height = self.image_height = self.original_image_height
+        
+        self.window = pygame.display.set_mode((self.window_width, self.window_height), 
+                                             pygame.FULLSCREEN if self.maximize_window else 0)
         pygame.display.set_caption("Dreamspace Navigator - Animated")
         self.font = pygame.font.Font(None, 20)
         self.clock = pygame.time.Clock()
@@ -108,33 +167,56 @@ class DreamspaceNavigator:
         # Background generation
         self.generation_thread: Optional[threading.Thread] = None
         
-        print(f"✅ Navigator initialized: {self.image_width}x{self.image_height}")
+        print(f"✅ Navigator initialized: {self.image_width}x{self.image_height} → {self.window_width}x{self.window_height}")
     
     def show_image(self, img, window, target_width: int, target_height: int):
-        """Display PIL Image in pygame window."""
+        """Display PIL Image in pygame window, scaling to fill screen while maintaining aspect ratio."""
         if img is None:
             return
         
-        # Resize image to target dimensions
-        img = img.resize((target_width, target_height))
+        # Calculate the scaling to fill the screen (touch opposite boundaries)
+        img_width, img_height = img.size
+        
+        # Calculate scale factors for both dimensions
+        scale_x = target_width / img_width
+        scale_y = target_height / img_height
+        
+        # Use the SMALLER scale factor to ensure image fits completely (touches 2 opposite sides, black borders on other 2)
+        scale = min(scale_x, scale_y)
+        
+        # Calculate new dimensions
+        new_width = int(img_width * scale)
+        new_height = int(img_height * scale)
+        
+        # Resize image to calculated dimensions
+        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Center the image in the window (black borders will appear on the sides that don't touch)
+        x_offset = (target_width - new_width) // 2
+        y_offset = (target_height - new_height) // 2
+        
+        # Clear the window with black background
+        window.fill((0, 0, 0))
+        
+        # Convert PIL image to pygame surface
         mode = img.mode
         size = img.size
         data = img.tobytes()
         py_img = pygame.image.fromstring(data, size, mode)
         
-        # Since window is now the exact size of the image, no centering needed
-        window.blit(py_img, (0, 0))
+        # Blit the image (will crop if larger than window)
+        window.blit(py_img, (x_offset, y_offset))
     
     def draw_ui(self, status_text: List[str], frame_info: str, generation_status: str):
         """Draw UI overlay."""
         # Semi-transparent overlay
-        overlay = pygame.Surface((self.image_width, 100))
+        overlay = pygame.Surface((self.window_width, 100))
         overlay.set_alpha(180)
         overlay.fill((0, 0, 0))
-        self.window.blit(overlay, (0, self.image_height - 100))
+        self.window.blit(overlay, (0, self.window_height - 100))
         
         # Status text
-        y_offset = self.image_height - 92
+        y_offset = self.window_height - 92
         for line in status_text:
             text_surface = self.font.render(line, True, (255, 255, 255))
             self.window.blit(text_surface, (10, y_offset))
@@ -143,12 +225,12 @@ class DreamspaceNavigator:
         # Frame info
         if frame_info:
             frame_surface = self.font.render(frame_info, True, (0, 255, 0))
-            self.window.blit(frame_surface, (10, self.image_height - 22))
+            self.window.blit(frame_surface, (10, self.window_height - 22))
         
         # Generation status
         if generation_status:
             gen_surface = self.font.render(generation_status, True, (255, 255, 0))
-            self.window.blit(gen_surface, (10, self.image_height - 42))
+            self.window.blit(gen_surface, (10, self.window_height - 42))
     
     def generate_initial_batch(self):
         """Generate the initial animation batch."""
@@ -179,7 +261,7 @@ class DreamspaceNavigator:
             self.window.fill((20, 20, 30))
             loading_text = f"Generating animation batch... {'.' * (loading_frame % 4)}"
             text_surface = self.font.render(loading_text, True, (255, 255, 255))
-            self.window.blit(text_surface, (10, self.image_height // 2))
+            self.window.blit(text_surface, (10, self.window_height // 2))
             pygame.display.flip()
             pygame.time.wait(100)
             loading_frame += 1
@@ -356,7 +438,7 @@ class DreamspaceNavigator:
             self.window.fill((0, 0, 0))
             current_frame = self.img_gen.get_current_frame()
             if current_frame:
-                self.show_image(current_frame, self.window, self.image_width, self.image_height)
+                self.show_image(current_frame, self.window, self.window_width, self.window_height)
             
             # Prepare UI status
             status = self.img_gen.get_status()
@@ -405,14 +487,19 @@ def main():
     """Main function using interactive prompts."""
     server_url, image_size = get_interactive_config()
     
+    # Ask user if they want to maximize the window
+    maximize_input = input("Maximize window to fill screen? (y/n, default=y): ").strip().lower()
+    maximize_window = maximize_input != 'n'
+    
     navigator = DreamspaceNavigator(
         server_url=server_url,
-        image_size=image_size,
-        batch_size=16,
+        image_size=(2048, 1280),
+        batch_size=2,
         initial_prompt="strange bright forest land, steampunk trees",
-        noise_magnitude=0.3,
+        noise_magnitude=0.17,
         bifurcation_step=3,
-        output_format="jpeg"
+        output_format="png",  # Use PNG default for better quality
+        maximize_window=maximize_window
     )
     
     navigator.run()
@@ -425,23 +512,27 @@ def main_with_args():
     # Get configuration from args
     server_url = args.server
     image_size = get_image_dimensions(args)
-    batch_size = args.batch_size
+    batch_size = 2
     initial_prompt = args.prompt
     
     # Bifurcated wiggle is now the default method
-    bifurcation_step = args.bifurcation_step
+    bifurcation_step = 3
     
-    # Get output format if available, default to jpeg
-    output_format = getattr(args, 'output_format', 'jpeg')
+    # Get output format if available, default to png for better quality
+    output_format = getattr(args, 'output_format', 'png')
+    
+    # Check if maximize option is available
+    maximize_window = getattr(args, 'maximize', False)
     
     navigator = DreamspaceNavigator(
         server_url=server_url,
-        image_size=image_size,
+        image_size=(2048, 1280),
         batch_size=batch_size,
         initial_prompt=initial_prompt,
         noise_magnitude=args.noise_magnitude,
         bifurcation_step=bifurcation_step,
-        output_format=output_format
+        output_format=output_format,
+        maximize_window=maximize_window
     )
     
     # Set initial configuration
