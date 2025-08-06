@@ -4,6 +4,8 @@ import asyncio
 import base64
 import time
 from io import BytesIO
+import traceback
+import time
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
@@ -334,8 +336,6 @@ def create_app(backend_type: str = "kandinsky_local",
         authenticated: bool = Depends(auth_dependency)
     ):
         """Generate a batch of image variations for animation with smart chunking for multi-GPU."""
-        import traceback
-        import time
 
         try:
             img_gen = get_img_gen()
@@ -423,42 +423,42 @@ def create_app(backend_type: str = "kandinsky_local",
                     from io import BytesIO  # Import inside function to avoid scope issues
                     import base64
                     import time
-                i, image = args
-                
-                # Time the JPEG encoding
-                jpeg_start = time.time()
-                
-                if request.output_format == "jpeg_optimized" and hasattr(image, 'dtype'):
-                    # Direct numpy → JPEG encoding (skip PIL)
-                    import cv2
-                    # Convert from float [0,1] to uint8 [0,255] if needed
-                    if image.dtype == 'float32' or image.dtype == 'float64':
-                        image_array = (image * 255).astype('uint8')
+                    i, image = args
+                    
+                    # Time the JPEG encoding
+                    jpeg_start = time.time()
+                    
+                    if request.output_format == "jpeg_optimized" and hasattr(image, 'dtype'):
+                        # Direct numpy → JPEG encoding (skip PIL)
+                        import cv2
+                        # Convert from float [0,1] to uint8 [0,255] if needed
+                        if image.dtype == 'float32' or image.dtype == 'float64':
+                            image_array = (image * 255).astype('uint8')
+                        else:
+                            image_array = image
+                        
+                        # Direct JPEG encoding
+                        _, jpeg_bytes = cv2.imencode('.jpg', image_array, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        buffer_size = len(jpeg_bytes)
+                        jpeg_time = time.time() - jpeg_start
+                        
+                        # Time the base64 encoding
+                        b64_start = time.time()
+                        image_b64 = base64.b64encode(jpeg_bytes.tobytes()).decode('utf-8')
+                        b64_time = time.time() - b64_start
                     else:
-                        image_array = image
+                        # Traditional PIL → JPEG encoding
+                        buffer = BytesIO()
+                        # Use JPEG with high quality for much smaller file sizes
+                        image.save(buffer, format='JPEG', quality=90, optimize=True)
+                        jpeg_time = time.time() - jpeg_start
+                        
+                        # Time the base64 encoding
+                        b64_start = time.time()
+                        buffer_size = len(buffer.getvalue())
+                        image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        b64_time = time.time() - b64_start
                     
-                    # Direct JPEG encoding
-                    _, jpeg_bytes = cv2.imencode('.jpg', image_array, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                    buffer_size = len(jpeg_bytes)
-                    jpeg_time = time.time() - jpeg_start
-                    
-                    # Time the base64 encoding
-                    b64_start = time.time()
-                    image_b64 = base64.b64encode(jpeg_bytes.tobytes()).decode('utf-8')
-                    b64_time = time.time() - b64_start
-                else:
-                    # Traditional PIL → JPEG encoding
-                    buffer = BytesIO()
-                    # Use JPEG with high quality for much smaller file sizes
-                    image.save(buffer, format='JPEG', quality=90, optimize=True)
-                    jpeg_time = time.time() - jpeg_start
-                    
-                    # Time the base64 encoding
-                    b64_start = time.time()
-                    buffer_size = len(buffer.getvalue())
-                    image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                    b64_time = time.time() - b64_start
-                
                     return i, image_b64, buffer_size, jpeg_time, b64_time
 
                 # Use ThreadPoolExecutor for parallel encoding if we have many images
@@ -524,7 +524,6 @@ def create_app(backend_type: str = "kandinsky_local",
                 )
 
         except Exception as e:
-            import traceback
             error_details = traceback.format_exc()
             print(f"❌ CRITICAL ERROR in generate_batch main logic: {e}")
             print(f"📋 Full traceback: {error_details}")
