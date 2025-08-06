@@ -49,7 +49,7 @@ class GenerateBatchRequest(BaseModel):
     seed: Optional[int] = Field(None, description="Base seed for variations")
     noise_magnitude: Optional[float] = Field(0.3, description="Magnitude of noise for latent variations")
     bifurcation_step: Optional[int] = Field(3, description="Number of steps from end to bifurcate in bifurcated wiggle")
-    output_format: Optional[str] = Field("jpeg", description="Output format: 'jpeg' (base64), 'tensor' (numpy), or 'png' (base64)")
+    output_format: Optional[str] = Field("png", description="Output format: 'png' (base64), 'jpeg' (base64), or 'tensor' (numpy)")
 
 
 class BatchImageResponse(BaseModel):
@@ -314,9 +314,9 @@ def create_app(backend_type: str = "kandinsky_local",
                 # Single image generation
                 image = img_gen.gen(prompt=request.prompt, **gen_params)
             
-            # Convert to base64 using JPEG for smaller file size
+            # Convert to base64 using PNG for lossless quality (default)
             buffer = BytesIO()
-            image.save(buffer, format='JPEG', quality=90, optimize=True)
+            image.save(buffer, format='PNG', optimize=True)
             image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
             
             return ImageResponse(
@@ -413,15 +413,19 @@ def create_app(backend_type: str = "kandinsky_local",
                 )
             
             else:
-                # Traditional PIL → JPEG → Base64 pipeline
-                print("📦 Encoding images to JPEG...")
+                # Traditional PIL → Image Format → Base64 pipeline
+                format_name = request.output_format.upper() if request.output_format in ['jpeg', 'png'] else 'PNG'
+                print(f"📦 Encoding images to {format_name}...")
                 encoding_start = time.time()
 
                 def encode_single_image(args):
+                    from io import BytesIO  # Import inside function to avoid scope issues
+                    import base64
+                    import time
                     i, image = args
                     
-                    # Time the JPEG encoding
-                    jpeg_start = time.time()
+                    # Time the image encoding
+                    encode_start = time.time()
                     
                     if request.output_format == "jpeg_optimized" and hasattr(image, 'dtype'):
                         # Direct numpy → JPEG encoding (skip PIL)
@@ -433,20 +437,23 @@ def create_app(backend_type: str = "kandinsky_local",
                             image_array = image
                         
                         # Direct JPEG encoding
-                        _, jpeg_bytes = cv2.imencode('.jpg', image_array, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                        buffer_size = len(jpeg_bytes)
-                        jpeg_time = time.time() - jpeg_start
+                        _, image_bytes = cv2.imencode('.jpg', image_array, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        buffer_size = len(image_bytes)
+                        encode_time = time.time() - encode_start
                         
                         # Time the base64 encoding
                         b64_start = time.time()
-                        image_b64 = base64.b64encode(jpeg_bytes.tobytes()).decode('utf-8')
+                        image_b64 = base64.b64encode(image_bytes.tobytes()).decode('utf-8')
                         b64_time = time.time() - b64_start
                     else:
-                        # Traditional PIL → JPEG encoding
+                        # Traditional PIL → Image Format encoding
                         buffer = BytesIO()
-                        # Use JPEG with high quality for much smaller file sizes
-                        image.save(buffer, format='JPEG', quality=90, optimize=True)
-                        jpeg_time = time.time() - jpeg_start
+                        # Use requested format or default to PNG for lossless quality
+                        if request.output_format == "jpeg":
+                            image.save(buffer, format='JPEG', quality=90, optimize=True)
+                        else:  # Default to PNG for lossless quality
+                            image.save(buffer, format='PNG', optimize=True)
+                        encode_time = time.time() - encode_start
                         
                         # Time the base64 encoding
                         b64_start = time.time()
@@ -454,7 +461,7 @@ def create_app(backend_type: str = "kandinsky_local",
                         image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
                         b64_time = time.time() - b64_start
                     
-                    return i, image_b64, buffer_size, jpeg_time, b64_time
+                    return i, image_b64, buffer_size, encode_time, b64_time
 
                 # Use ThreadPoolExecutor for parallel encoding if we have many images
                 if len(all_images) > 8:
@@ -467,27 +474,27 @@ def create_app(backend_type: str = "kandinsky_local",
                     results.sort(key=lambda x: x[0])
                     image_b64_list = [r[1] for r in results]
                     total_size = sum(r[2] for r in results)
-                    total_jpeg_time = sum(r[3] for r in results)
+                    total_encode_time = sum(r[3] for r in results)
                     total_b64_time = sum(r[4] for r in results)
 
                     print(f"  Parallel encoded {len(all_images)} images")
-                    print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
+                    print(f"  📸 Image encoding time: {total_encode_time:.3f}s total, {total_encode_time/len(all_images):.3f}s avg")
                     print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
                 else:
                     # Sequential encoding for smaller batches
                     image_b64_list = []
                     total_size = 0
-                    total_jpeg_time = 0
+                    total_encode_time = 0
                     total_b64_time = 0
 
                     for i, image in enumerate(all_images):
-                        _, image_b64, buffer_size, jpeg_time, b64_time = encode_single_image((i, image))
+                        _, image_b64, buffer_size, encode_time, b64_time = encode_single_image((i, image))
                         image_b64_list.append(image_b64)
                         total_size += buffer_size
-                        total_jpeg_time += jpeg_time
+                        total_encode_time += encode_time
                         total_b64_time += b64_time
 
-                    print(f"  📸 JPEG encoding time: {total_jpeg_time:.3f}s total, {total_jpeg_time/len(all_images):.3f}s avg")
+                    print(f"  📸 Image encoding time: {total_encode_time:.3f}s total, {total_encode_time/len(all_images):.3f}s avg")
                     print(f"  🔤 Base64 encoding time: {total_b64_time:.3f}s total, {total_b64_time/len(all_images):.3f}s avg")
 
                 encoding_time = time.time() - encoding_start
