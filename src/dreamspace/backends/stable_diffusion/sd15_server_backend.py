@@ -322,45 +322,18 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         # Handle output format processing
         if output_format == "tensor":
             # For tensor format: keep as PyTorch tensor, just normalize to [0,1]
-            
-            # Debug: Check if there are any pending operations
-            if images.device.type == 'cuda':
-                torch.cuda.synchronize()  # Clear any pending operations first
-                
-            print(f"🔍 About to normalize tensor:")
-            print(f"   Shape: {images.shape}, Device: {images.device}, Dtype: {images.dtype}")
-            print(f"   Requires grad: {images.requires_grad}, Is contiguous: {images.is_contiguous()}")
-            
-            # Test individual operations to isolate the bottleneck
-            div_start = time.time()
+            normalize_start = time.time()
             with torch.no_grad():
-                step1 = images / 2
-            div_time = time.time() - div_start
-            
-            add_start = time.time()
-            with torch.no_grad():
-                step2 = step1 + 0.5
-            add_time = time.time() - add_start
-            
-            clamp_start = time.time()
-            with torch.no_grad():
-                images = step2.clamp(0, 1)
-            clamp_time = time.time() - clamp_start
-            
-            total_norm_time = div_time + add_time + clamp_time
-            
+                images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+            normalize_time = time.time() - normalize_start
             print(f"🚀 Keeping tensor format for ultra-fast serialization")
-            print(f"⚡ Tensor normalization breakdown:")
-            print(f"   Division (/2): {div_time:.6f}s")
-            print(f"   Addition (+0.5): {add_time:.6f}s") 
-            print(f"   Clamp(0,1): {clamp_time:.6f}s")
-            print(f"   Total: {total_norm_time:.6f}s")
+            print(f"⚡ Tensor normalization completed in {normalize_time:.6f}s")
             
             decode_time = time.time() - decode_start
             print(f"🎨 Total VAE decoding (tensor format) completed in {decode_time:.3f}s")
             print(f"   🔮 VAE decode: {vae_time:.3f}s ({vae_time/decode_time*100:.1f}%)")
-            print(f"   ⚡ Tensor normalization: {total_norm_time:.3f}s ({total_norm_time/decode_time*100:.1f}%)")
-            print(f"   📊 Other operations: {decode_time-vae_time-total_norm_time:.3f}s ({(decode_time-vae_time-total_norm_time)/decode_time*100:.1f}%)")
+            print(f"   ⚡ Tensor normalization: {normalize_time:.3f}s ({normalize_time/decode_time*100:.1f}%)")
+            print(f"   📊 Other operations: {decode_time-vae_time-normalize_time:.3f}s ({(decode_time-vae_time-normalize_time)/decode_time*100:.1f}%)")
         else:
             # For other formats: convert to numpy then PIL
             tensor_convert_start = time.time()
