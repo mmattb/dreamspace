@@ -323,9 +323,34 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         if output_format == "tensor":
             # For tensor format: keep as PyTorch tensor, just normalize to [0,1]
             normalize_start = time.time()
-            images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+            
+            # Debug tensor state before normalization
+            print(f"🔍 Pre-normalization debug:")
+            print(f"   Shape: {images.shape}")
+            print(f"   Device: {images.device}")
+            print(f"   Dtype: {images.dtype}")
+            print(f"   Memory format: {images.memory_format if hasattr(images, 'memory_format') else 'unknown'}")
+            print(f"   Requires grad: {images.requires_grad}")
+            print(f"   Is contiguous: {images.is_contiguous()}")
+            
+            # Force GPU sync before timing to isolate the normalization operation
+            if images.device.type == 'cuda':
+                torch.cuda.synchronize()
+            
+            norm_op_start = time.time()
+            with torch.no_grad():
+                images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+            
+            # Force GPU sync after to get accurate timing
+            if images.device.type == 'cuda':
+                torch.cuda.synchronize()
+            
             normalize_time = time.time() - normalize_start
+            norm_op_time = time.time() - norm_op_start
             print(f"🚀 Keeping tensor format for ultra-fast serialization")
+            print(f"🔍 Normalization timing breakdown:")
+            print(f"   Total (including sync): {normalize_time:.6f}s")
+            print(f"   Pure operation: {norm_op_time:.6f}s")
             
             decode_time = time.time() - decode_start
             print(f"🎨 Total VAE decoding (tensor format) completed in {decode_time:.3f}s")
