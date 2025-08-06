@@ -92,9 +92,15 @@ Examples:
     )
     
     parser.add_argument(
-        "--output-format", type=str, default="jpeg", 
+        "--output-format", type=str, default="png", 
         choices=["jpeg", "tensor", "png", "jpeg_optimized"],
-        help="Output format: 'jpeg' (default), 'tensor' (fast local), 'png', or 'jpeg_optimized' (skip PIL)"
+        help="Output format: 'png' (default, lossless), 'jpeg', 'tensor' (fast local), or 'jpeg_optimized' (skip PIL)"
+    )
+    
+    # Display options
+    parser.add_argument(
+        "--maximize", action="store_true",
+        help="Maximize window to fill screen while maintaining aspect ratio"
     )
     
     return parser.parse_args()
@@ -132,7 +138,7 @@ def get_interactive_config() -> Tuple[str, Tuple[int, int]]:
     return server_url, (image_width, image_height)
 
 
-def print_welcome_message(server_url: str, image_size: Tuple[int, int], batch_size: int):
+def print_welcome_message(server_url: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2):
     """Print welcome message with configuration details."""
     width, height = image_size
     print(f"🖼️ Using image size: {width}x{height}")

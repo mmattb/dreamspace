@@ -121,7 +121,7 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, image_size: Tuple[int, int], batch_size: int, prompt: str, noise_magnitude: float = 0.3, bifurcation_step: int = 3, output_format: str = "jpeg"):
+    def __init__(self, server_url: str, prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg"):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
@@ -286,13 +286,13 @@ def main():
         image_size = (size, size)
     
     # Bifurcated wiggle is now the default method
-    bifurcation_step = args.bifurcation_step
+    bifurcation_step = 3
 
     # Create speed tester
     tester = SpeedTester(
         server_url=args.server,
         image_size=image_size,
-        batch_size=args.batch_size,
+        batch_size=2,
         prompt=args.prompt,
         noise_magnitude=args.noise_magnitude,
         bifurcation_step=bifurcation_step,
