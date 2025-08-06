@@ -7,6 +7,7 @@ from .animation import (
     AnimationController, CrossBatchTransition
 )
 from .remote_generator import AnimatedRemoteImgGen
+from .utils import no_grad_method
 
 __all__ = [
     "ImgGenBackend", 
@@ -17,5 +18,6 @@ __all__ = [
     "WaveRhythm",
     "AnimationController", 
     "CrossBatchTransition",
-    "AnimatedRemoteImgGen"
+    "AnimatedRemoteImgGen",
+    "no_grad_method"
 ]
