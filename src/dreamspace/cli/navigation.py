@@ -54,8 +54,8 @@ Examples:
     
     # Generation parameters
     parser.add_argument(
-        "--batch-size", type=int, default=16,
-        help="Animation batch size (default: 16)"
+        "--batch-size", type=int, default=2,
+        help="Animation batch size (default: 2)"
     )
     
     parser.add_argument(
@@ -93,8 +93,8 @@ Examples:
     
     # Generation settings (bifurcated wiggle is now the default method)
     parser.add_argument(
-        "--noise-magnitude", type=float, default=0.3,
-        help="Magnitude of noise for latent wiggle variations (default: 0.3)"
+        "--noise-magnitude", type=float, default=0.27,
+        help="Magnitude of noise for latent wiggle variations (default: 0.27)"
     )
 
     parser.add_argument(
