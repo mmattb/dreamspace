@@ -323,6 +323,201 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 'embeddings': self._extract_text_embeddings(prompt)
             }
     
+    @no_grad_method
+    def generate_interpolated_embeddings(self, prompt1: str, prompt2: str, batch_size: int, output_format: str = "pil", **kwargs) -> Dict[str, Any]:
+        """Generate a batch of images using interpolated embeddings between two prompts.
+
+        Args:
+            prompt1: The starting text prompt.
+            prompt2: The ending text prompt.
+            batch_size: Number of interpolation steps (including start and end).
+            output_format: Format of the output images (e.g., "pil", "tensor", "jpeg", "png").
+
+        Returns:
+            A dictionary containing the generated images and metadata.
+        """
+        total_start = time.time()
+        print(f"🌈 Starting interpolated embedding generation: '{prompt1}' → '{prompt2}' with {batch_size} steps")
+        
+        # Setup phase
+        setup_start = time.time()
+        
+        # Force all models to eval mode
+        self.pipe.unet.eval()
+        self.pipe.vae.eval() 
+        self.pipe.text_encoder.eval()
+        
+        if hasattr(self.pipe.vae, 'enable_slicing'):
+            self.pipe.vae.enable_slicing()
+
+        # Set default generator for reproducibility on the correct device
+        if 'generator' not in kwargs and 'seed' in kwargs:
+            seed = kwargs.pop('seed')
+            device = self.device if hasattr(self, 'device') else 'cuda'
+            kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
+
+        generator = kwargs.get('generator')
+        guidance_scale = kwargs.get('guidance_scale', 7.5)
+        height = kwargs.get('height', 512)
+        width = kwargs.get('width', 512)
+        num_inference_steps = kwargs.get('num_inference_steps', 50)
+
+        # Set scheduler timesteps
+        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+        
+        setup_time = time.time() - setup_start
+        print(f"⚙️ Setup completed in {setup_time:.3f}s")
+
+        # Encode both prompts into embeddings properly
+        encode_start = time.time()
+        
+        # Extract embeddings for both prompts
+        embedding1 = self._extract_text_embeddings(prompt1)
+        embedding2 = self._extract_text_embeddings(prompt2)
+        
+        if embedding1 is None or embedding2 is None:
+            raise ValueError("Failed to extract text embeddings from prompts")
+        
+        # Create interpolated embeddings
+        interpolated_embeddings = []
+        for alpha in torch.linspace(0, 1, steps=batch_size):
+            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
+            interpolated_embeddings.append(interpolated)
+        
+        # Stack all interpolated embeddings into a batch
+        batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)
+        
+        # Create negative embeddings for classifier-free guidance (use empty prompt)
+        negative_embedding = self._extract_text_embeddings("")
+        batch_negative_embeds = negative_embedding.repeat(batch_size, 1, 1)
+        
+        # Concatenate negative and positive embeddings for classifier-free guidance
+        batch_combined_embeds = torch.cat([batch_negative_embeds, batch_prompt_embeds])
+        
+        encode_time = time.time() - encode_start
+        print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
+
+        # Prepare initial noise for the batch
+        noise_start = time.time()
+        
+        latents_batch = self.pipe.prepare_latents(
+            batch_size=batch_size,
+            num_channels_latents=self.pipe.unet.config.in_channels,
+            height=height,
+            width=width,
+            dtype=self.pipe.unet.dtype,
+            device=self.pipe.device,
+            generator=generator,
+        )
+        
+        noise_time = time.time() - noise_start
+        print(f"🎲 Batch noise preparation completed in {noise_time:.3f}s")
+
+        # Run denoising for all interpolated embeddings in parallel
+        denoise_start = time.time()
+        
+        timesteps = self.pipe.scheduler.timesteps
+        
+        for i, t in enumerate(timesteps):
+            # Process entire batch at once
+            latent_input = torch.cat([latents_batch] * 2)
+            latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
+
+            with torch.no_grad():
+                noise_pred = self.pipe.unet(
+                    latent_input, t, encoder_hidden_states=batch_combined_embeds
+                ).sample
+
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            latents_batch = self.pipe.scheduler.step(noise_pred, t, latents_batch).prev_sample
+            
+            # Clean up intermediate tensors to free GPU memory
+            del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
+
+        denoise_time = time.time() - denoise_start
+        print(f"🧠 Parallel denoising ({num_inference_steps} steps × {batch_size} interpolations) completed in {denoise_time:.3f}s")
+
+        # Decode the batch of latents to images
+        decode_start = time.time()
+        
+        # Use direct VAE decode with explicit no_grad
+        vae_start = time.time()
+        with torch.no_grad():
+            latents_batch.requires_grad_(False)
+            images = self.pipe.vae.decode(latents_batch / 0.18215).sample
+        vae_time = time.time() - vae_start
+        print(f"🔮 VAE decode completed in {vae_time:.3f}s")
+        
+        images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
+
+        # Handle output format processing (same as generate())
+        if output_format == "tensor":
+            # For tensor format: keep as PyTorch tensor, just normalize to [0,1]
+            normalize_start = time.time()
+            normalize_time = time.time() - normalize_start
+            print(f"🚀 Keeping tensor format for ultra-fast serialization")
+            print(f"⚡ Tensor normalization completed in {normalize_time:.6f}s")
+            
+            decode_time = time.time() - decode_start
+            print(f"🎨 Total VAE decoding (tensor format) completed in {decode_time:.3f}s")
+        else:
+            # For other formats: convert to numpy then PIL
+            tensor_convert_start = time.time()
+            images = images.cpu().permute(0, 2, 3, 1).float().numpy()  # BCHW -> BHWC and to numpy
+            tensor_convert_time = time.time() - tensor_convert_start
+            print(f"🔄 Tensor→numpy conversion completed in {tensor_convert_time:.3f}s")
+            
+            # Convert to PIL Images for other formats
+            pil_start = time.time()
+            pil_images = []
+            for i in range(images.shape[0]):
+                image_array = (images[i] * 255).astype('uint8')  # Convert to 0-255 range
+                pil_image = Image.fromarray(image_array)
+                pil_images.append(pil_image)
+            pil_time = time.time() - pil_start
+            print(f"🖼️ Numpy→PIL conversion completed in {pil_time:.3f}s")
+            
+            decode_time = time.time() - decode_start
+            print(f"🎨 Total VAE decoding + PIL conversion completed in {decode_time:.3f}s")
+        
+        total_time = time.time() - total_start
+        print(f"✅ Total interpolated embedding generation time: {total_time:.3f}s")
+        print(f"📊 Timing breakdown:")
+        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
+        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
+        print(f"   🎲 Noise prep: {noise_time:.3f}s ({noise_time/total_time*100:.1f}%)")
+        print(f"   🧠 Denoising: {denoise_time:.3f}s ({denoise_time/total_time*100:.1f}%)")
+        print(f"   🎨 Decoding: {decode_time:.3f}s ({decode_time/total_time*100:.1f}%)")
+
+        # Return based on requested output format (same as generate())
+        if output_format == "tensor":
+            return {
+                'images': images,  # PyTorch tensor [0,1] range, shape (batch, channels, height, width)
+                'format': 'torch_tensor',
+                'shape': tuple(images.shape),
+                'device': str(images.device),
+                'dtype': str(images.dtype),
+                'latents': latents_batch,
+                'embeddings': batch_prompt_embeds
+            }
+        elif output_format == "pil":
+            return {
+                'images': pil_images,  # PIL Images
+                'format': 'pil',
+                'latents': latents_batch,
+                'embeddings': batch_prompt_embeds
+            }
+        else:
+            # Default to PIL for now, could add other formats later
+            return {
+                'images': pil_images,  # PIL Images
+                'format': 'pil', 
+                'latents': latents_batch,
+                'embeddings': batch_prompt_embeds
+            }
+    
     def interpolate_embeddings(self, embedding1: Any, embedding2: Any, alpha: float) -> Any:
         """Interpolate between two text embeddings."""
         if embedding1 is None or embedding2 is None:
