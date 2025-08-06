@@ -80,17 +80,7 @@ Examples:
         help="Use interactive prompts for configuration"
     )
     
-    # Latent wiggle settings
-    parser.add_argument(
-        "--latent-wiggle", action="store_true",
-        help="Enable latent wiggle pipeline (skips img2img pipeline)"
-    )
-
-    parser.add_argument(
-        "--bifurcated-wiggle", action="store_true",
-        help="Use bifurcated wiggle method (improved manifold adherence)"
-    )
-
+    # Generation settings (bifurcated wiggle is now the default method)
     parser.add_argument(
         "--noise-magnitude", type=float, default=0.3,
         help="Magnitude of noise for latent wiggle variations (default: 0.3)"
@@ -98,7 +88,7 @@ Examples:
 
     parser.add_argument(
         "--bifurcation-step", type=int, default=3,
-        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3, set to 0 for original wiggle)"
+        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3)"
     )
     
     parser.add_argument(

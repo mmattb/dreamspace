@@ -54,17 +54,6 @@ class BatchImageResponse(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata")
 
 
-class Img2ImgRequest(BaseModel):
-    prompt: str = Field(..., description="Text prompt for image transformation")
-    image: str = Field(..., description="Base64 encoded source image")
-    strength: float = Field(0.5, description="Transformation strength (0.0-1.0)")
-    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
-    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
-    width: Optional[int] = Field(768, description="Image width")
-    height: Optional[int] = Field(768, description="Image height")
-    seed: Optional[int] = Field(None, description="Seed for reproducibility")
-
-
 class InterpolateRequest(BaseModel):
     embedding1: List[float] = Field(..., description="First embedding")
     embedding2: List[float] = Field(..., description="Second embedding")
@@ -361,35 +350,20 @@ def create_app(backend_type: str = "kandinsky_local",
             }
 
             # Delegate batch generation with latent wiggle to the backend
-            print(f"🎬 Generating batch of {batch_size} images with latent wiggle...")
+            print(f"🎬 Generating batch of {batch_size} images with bifurcated wiggle (default method)...")
             start_time = time.time()
             base_seed = request.seed or 42  # Default seed if not provided
 
-            # Choose between original and bifurcated wiggle methods
-            # Bifurcated wiggle is now the default method
-            # Set bifurcation_step to 0 to use original method (for backwards compatibility)
-            use_original = request.bifurcation_step == 0
-            
-            if use_original:
-                print("🎯 Using original latent wiggle method (bifurcation_step=0)")
-                # Call the original wiggle method
-                result = img_gen.backend.generate_batch_with_latent_wiggle(
-                    prompt=request.prompt,
-                    batch_size=batch_size,
-                    noise_magnitude=request.noise_magnitude,
-                    **gen_params
-                )
-            else:
-                print(f"🔀 Using bifurcated wiggle with {request.bifurcation_step} refinement steps (default method)")
-                # Call the bifurcated wiggle method with output format
-                result = img_gen.backend.generate_batch_with_bifurcated_wiggle(
-                    prompt=request.prompt,
-                    batch_size=batch_size,
-                    noise_magnitude=request.noise_magnitude,
-                    bifurcation_step=request.bifurcation_step,
-                    output_format="tensor" if request.output_format == "tensor" else "pil",
-                    **gen_params
-                )
+            # Always use bifurcated wiggle method (now the default)
+            print(f"🔀 Using bifurcated wiggle with {request.bifurcation_step} refinement steps")
+            result = img_gen.backend.generate_batch_with_bifurcated_wiggle(
+                prompt=request.prompt,
+                batch_size=batch_size,
+                noise_magnitude=request.noise_magnitude,
+                bifurcation_step=request.bifurcation_step,
+                output_format="tensor" if request.output_format == "tensor" else "pil",
+                **gen_params
+            )
 
             all_images = result['images']
             result_format = result.get('format', 'pil')
@@ -397,7 +371,7 @@ def create_app(backend_type: str = "kandinsky_local",
             print(f"✅ Batch generation complete: {len(all_images)} images in {result_format} format")
 
             # Handle different output formats
-            if request.output_format == "tensor" and result_format == "numpy_float32":
+            if request.output_format == "tensor" and result_format == "torch_tensor":
                 # Ultra-fast tensor serialization for local clients
                 print("🚀 Serializing tensors for high-speed local transfer...")
                 encoding_start = time.time()
@@ -405,10 +379,10 @@ def create_app(backend_type: str = "kandinsky_local",
                 import torch
                 from io import BytesIO
                 
-                # Convert numpy back to torch tensor for fast serialization
-                tensor_data = torch.from_numpy(all_images)
+                # all_images is already a PyTorch tensor - no conversion needed!
+                tensor_data = all_images
                 
-                # Use torch.save to BytesIO - much faster than pickle
+                # Use torch.save to BytesIO - direct tensor serialization
                 buffer = BytesIO()
                 torch.save(tensor_data, buffer)
                 buffer.seek(0)
@@ -430,13 +404,13 @@ def create_app(backend_type: str = "kandinsky_local",
                         "batch_size": len(all_images),
                         "animation_ready": True,
                         "generation_time": time.time() - start_time,
-                        "generation_method": "latent_wiggle" if use_original else "bifurcated_wiggle",
+                        "generation_method": "bifurcated_wiggle",
                         "output_format": "tensor",
                         "tensor_shape": list(all_images.shape),
                         "tensor_dtype": str(all_images.dtype),
                         "serialization": "torch_save",
                         "noise_magnitude": request.noise_magnitude,
-                        "bifurcation_step": None if use_original else request.bifurcation_step
+                        "bifurcation_step": request.bifurcation_step
                     }
                 )
             
@@ -536,7 +510,7 @@ def create_app(backend_type: str = "kandinsky_local",
                     "batch_size": len(image_b64_list),
                     "animation_ready": True,
                     "generation_time": time.time() - start_time,
-                    "generation_method": "latent_wiggle" if use_original else "bifurcated_wiggle",
+                    "generation_method": "bifurcated_wiggle",
                     "multi_gpu": False,  # Using single GPU with batch generation
                     "gpu_count": 1,
                     "seed": request.seed,
@@ -545,7 +519,7 @@ def create_app(backend_type: str = "kandinsky_local",
                     "output_format": request.output_format or "jpeg",
                     "encoding_time": encoding_time,
                     "noise_magnitude": request.noise_magnitude,
-                    "bifurcation_step": None if use_original else request.bifurcation_step
+                    "bifurcation_step": request.bifurcation_step
                 }
             )
 
@@ -555,53 +529,6 @@ def create_app(backend_type: str = "kandinsky_local",
             print(f"❌ CRITICAL ERROR in generate_batch main logic: {e}")
             print(f"📋 Full traceback: {error_details}")
             raise HTTPException(status_code=500, detail=f"Batch generation failed: {str(e)}")
-    
-    @app.post("/img2img", response_model=ImageResponse)
-    async def image_to_image(
-        request: Img2ImgRequest,
-        authenticated: bool = Depends(auth_dependency)
-    ):
-        """Transform an image using text prompt."""
-        try:
-            img_gen = get_img_gen()
-            
-            # Decode source image
-            image_data = base64.b64decode(request.image)
-            source_image = Image.open(BytesIO(image_data))
-            
-            # Prepare generation parameters
-            gen_params = {
-                k: v for k, v in request.dict().items() 
-                if v is not None and k not in ['prompt', 'image', 'strength']
-            }
-            
-            # Transform image
-            result_image = img_gen.gen_img2img(
-                strength=request.strength,
-                prompt=request.prompt,
-                **gen_params
-            )
-            
-            # Convert to base64 using JPEG for smaller file size
-            buffer = BytesIO()
-            result_image.save(buffer, format='JPEG', quality=90, optimize=True)
-            image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            
-            # Log encoding info
-            buffer_size = len(buffer.getvalue())
-            print(f"📦 Encoded img2img result: {buffer_size/1024:.1f}KB")
-            
-            return ImageResponse(
-                image=image_b64,
-                metadata={
-                    "prompt": request.prompt,
-                    "strength": request.strength,
-                    "parameters": gen_params
-                }
-            )
-            
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
     
     @app.post("/interpolate")
     async def interpolate_embeddings(
