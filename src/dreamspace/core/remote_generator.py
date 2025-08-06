@@ -203,9 +203,9 @@ class AnimatedRemoteImgGen:
         finally:
             self.is_generating = False
     
-    def generate_interpolated_animation_batch(self, prompt1: str, prompt2: str, 
-                                            batch_size: int = 32, 
-                                            request_id: str = None, **kwargs) -> List[Image.Image]:
+    def generate_interpolated_embeddings(self, prompt1: str, prompt2: str, 
+                                        batch_size: int = 32, 
+                                        request_id: str = None, **kwargs) -> List[Image.Image]:
         """Generate a batch of frames interpolating between two prompts."""
         # Set up request tracking
         if request_id is None:

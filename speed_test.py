@@ -206,7 +206,7 @@ class SpeedTester:
         try:
             if self.interpolation_mode and self.prompt2:
                 # Use interpolated embeddings generation
-                frames = self.img_gen.generate_interpolated_animation_batch(
+                frames = self.img_gen.generate_interpolated_embeddings(
                     prompt1=self.prompt,
                     prompt2=self.prompt2,
                     batch_size=self.batch_size,

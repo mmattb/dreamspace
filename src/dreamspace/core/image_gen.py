@@ -282,7 +282,7 @@ class ImgGen:
         """
         self.generation_params.update(kwargs)
     
-    def gen_interpolated_embeddings(self, prompt1: str, prompt2: str, batch_size: int, **kwargs) -> List[Image.Image]:
+    def generate_interpolated_embeddings(self, prompt1: str, prompt2: str, batch_size: int, **kwargs) -> List[Image.Image]:
         """Generate a batch of images using interpolated embeddings between two prompts.
         
         Args:
@@ -297,7 +297,7 @@ class ImgGen:
         # Merge generation parameters
         params = {**self.generation_params, **kwargs}
         
-        # Call backend method
+        # Call backend method directly
         result = self.backend.generate_interpolated_embeddings(
             prompt1=prompt1,
             prompt2=prompt2, 
@@ -305,17 +305,26 @@ class ImgGen:
             **params
         )
         
-        # Extract images from result
-        images = result['images'] if isinstance(result['images'], list) else [result['images']]
-        
-        # Register the first image for continuity
-        if images:
-            self.register(
-                images[0],
-                result.get('embeddings'),
-                result.get('latents'), 
-                prompt1
-            )
+        # Handle different result formats
+        if isinstance(result, dict):
+            # Backend returns dict format
+            images = result['images'] if isinstance(result['images'], list) else [result['images']]
+            
+            # Register the first image for continuity
+            if images:
+                self.register(
+                    images[0],
+                    result.get('embeddings'),
+                    result.get('latents'), 
+                    prompt1
+                )
+        else:
+            # Backend returns list directly (for remote generators)
+            images = result if isinstance(result, list) else [result]
+            
+            # Register the first image for continuity
+            if images:
+                self.register(images[0], None, None, prompt1)
         
         return images
     

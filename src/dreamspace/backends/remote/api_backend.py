@@ -120,6 +120,52 @@ class RemoteBackend(ImgGenBackend):
         response = self._make_request("POST", "/interpolate", payload)
         return response.json().get('result')
     
+    def generate_interpolated_embeddings(self, prompt1: str, prompt2: str, batch_size: int, **kwargs) -> Dict[str, Any]:
+        """Generate a batch of images using interpolated embeddings via API.
+        
+        Args:
+            prompt1: The starting text prompt
+            prompt2: The ending text prompt
+            batch_size: Number of interpolation steps (including start and end)
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            Dict with 'images', 'latents', and 'embeddings'
+        """
+        payload = {
+            "prompt1": prompt1,
+            "prompt2": prompt2,
+            "batch_size": batch_size,
+            **kwargs
+        }
+        
+        response = self._make_request("POST", "/generate_interpolated_embeddings", payload)
+        return self._process_batch_image_response(response)
+    
+    def _process_batch_image_response(self, response: requests.Response) -> Dict[str, Any]:
+        """Process API response containing multiple images.
+        
+        Args:
+            response: HTTP response object
+            
+        Returns:
+            Dict with processed images and metadata
+        """
+        data = response.json()
+        
+        # Convert base64 images back to PIL Images
+        images = []
+        for image_data in data['images']:
+            image_bytes = base64.b64decode(image_data)
+            image = Image.open(BytesIO(image_bytes))
+            images.append(image)
+        
+        return {
+            'images': images,
+            'latents': data.get('metadata', {}).get('latents'),
+            'embeddings': data.get('metadata', {}).get('embeddings')
+        }
+
     def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> requests.Response:
         """Make an HTTP request with retry logic.
         
