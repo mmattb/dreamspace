@@ -357,7 +357,7 @@ def create_app(backend_type: str = "kandinsky_local",
 
             # Always use bifurcated wiggle method (now the default)
             print(f"🔀 Using bifurcated wiggle with {request.bifurcation_step} refinement steps")
-            result = img_gen.backend.generate_batch_with_bifurcated_wiggle(
+            result = img_gen.backend.generate(
                 prompt=request.prompt,
                 batch_size=batch_size,
                 noise_magnitude=request.noise_magnitude,

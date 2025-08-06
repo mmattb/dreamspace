@@ -78,85 +78,8 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         print(f"✅ Stable Diffusion 1.5 loaded successfully on {self.device}!")
     
-    def generate(self, prompt: str, **kwargs) -> Dict[str, Any]:
-        """Generate an image from a text prompt."""
-        # Set default generator for reproducibility on the correct device
-        if 'generator' not in kwargs and 'seed' in kwargs:
-            seed = kwargs.pop('seed')
-            # Create generator on the same device as the pipeline
-            device = self.device if hasattr(self, 'device') else 'cuda'
-            kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
-
-        generator = kwargs['generator']
-        guidance_scale = kwargs.get('guidance_scale', 7.5)
-        height = kwargs.get('height', 512)
-        width = kwargs.get('width', 512)
-
-        # Step 1: Encode the prompt
-        prompt_embeds = self.pipe._encode_prompt(
-            prompt,
-            device=self.pipe.device,
-            num_images_per_prompt=1,
-            do_classifier_free_guidance=True
-        )
-
-        # Step 2: Prepare initial noise
-        latents = self.pipe.prepare_latents(
-            batch_size=1,
-            num_channels_latents=self.pipe.unet.in_channels,
-            height=height,
-            width=width,
-            dtype=self.pipe.unet.dtype,
-            device=self.pipe.device,
-            generator=generator,
-        )
-
-        # Step 3: Run the diffusion loop manually
-        for t in self.pipe.scheduler.timesteps:
-            latent_input = torch.cat([latents] * 2)
-            latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-
-            noise_pred = self.pipe.unet(
-                latent_input, t, encoder_hidden_states=prompt_embeds
-            ).sample
-
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
-
-        # Step 4: Decode latents to single image
-        images = self.pipe.vae.decode(latents / 0.18215).sample
-
-        return {
-            'image': images,  # Single image tensor
-            'latents': latents,
-            'embeddings': self._extract_text_embeddings(prompt)
-        }
-    
-    def generate_batch_with_latent_wiggle(self, prompt: str, batch_size: int, noise_magnitude: float, **kwargs) -> Dict[str, Any]:
-        """Generate a batch of images with latent wiggle variations.
-        
-        This method now defaults to bifurcated wiggle for better manifold adherence.
-        """
-        # Default bifurcated wiggle parameters
-        bifurcation_step = kwargs.pop('bifurcation_step', 3)  # Default to 3 steps from end
-        output_format = kwargs.get('output_format', 'pil')
-        
-        print(f"🔀 Using bifurcated wiggle as default (bifurcation_step={bifurcation_step})")
-        
-        # Call the bifurcated method with the same parameters
-        return self.generate_batch_with_bifurcated_wiggle(
-            prompt=prompt,
-            batch_size=batch_size,
-            noise_magnitude=noise_magnitude,
-            bifurcation_step=bifurcation_step,
-            output_format=output_format,
-            **kwargs
-        )
-    
     @no_grad_method
-    def generate_batch_with_bifurcated_wiggle(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, output_format: str = "pil", **kwargs) -> Dict[str, Any]:
+    def generate(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, output_format: str = "pil", **kwargs) -> Dict[str, Any]:
         """Generate a batch of images with bifurcated latent wiggle variations.
         
         This approach runs shared denoising until bifurcation_step, then adds noise
