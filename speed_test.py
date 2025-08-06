@@ -64,16 +64,16 @@ Examples:
     
     # Image dimensions
     parser.add_argument(
-        "--size", type=int, choices=[256, 512, 768, 1024], default=512,
-        help="Image size (square) - choose from 256, 512, 768, 1024 (default: 512)"
+        "--size", type=int, choices=[256, 512, 768, 1024, 2048], default=2048,
+        help="Image size (square) - choose from 256, 512, 768, 1024, 2048 (default: 2048)"
     )
     
     parser.add_argument(
-        "--width", type=int, help="Image width (overrides --size)"
+        "--width", type=int, default=2048, help="Image width (overrides --size)"
     )
     
     parser.add_argument(
-        "--height", type=int, help="Image height (overrides --size)"
+        "--height", type=int, default=1280, help="Image height (overrides --size)"
     )
     
     # Generation parameters
@@ -121,7 +121,7 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg"):
+    def __init__(self, server_url: str, prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "png"):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
