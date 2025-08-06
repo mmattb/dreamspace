@@ -517,9 +517,9 @@ def main():
     navigator = DreamspaceNavigator(
         server_url=server_url,
         image_size=(2048, 1280),
-        batch_size=2,
+        batch_size=2,  # Set default back to 2 for interactive mode
         initial_prompt="strange bright forest land, steampunk trees",
-        noise_magnitude=0.17,
+        noise_magnitude=0.27,  # Updated default noise magnitude
         bifurcation_step=3,
         output_format="png",  # Use PNG default for better quality
         maximize_window=maximize_window
@@ -543,7 +543,7 @@ def main_with_args():
     # Get configuration from args
     server_url = args.server
     image_size = get_image_dimensions(args)
-    batch_size = 2
+    batch_size = args.batch_size  # Use the CLI argument instead of hardcoding
     initial_prompt = args.prompt
     
     # Bifurcated wiggle is now the default method (ignored in interpolation mode)

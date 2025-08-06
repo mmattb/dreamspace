@@ -401,11 +401,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         encode_time = time.time() - encode_start
         print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
 
-        # Prepare initial noise for the batch
+        # Prepare initial noise for the batch - use same latent for all interpolation steps
         noise_start = time.time()
         
-        latents_batch = self.pipe.prepare_latents(
-            batch_size=batch_size,
+        # Generate a single latent and repeat it for all interpolation steps
+        single_latent = self.pipe.prepare_latents(
+            batch_size=1,
             num_channels_latents=self.pipe.unet.config.in_channels,
             height=height,
             width=width,
@@ -414,8 +415,11 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             generator=generator,
         )
         
+        # Repeat the same latent for all interpolation steps
+        latents_batch = single_latent.repeat(batch_size, 1, 1, 1)
+        
         noise_time = time.time() - noise_start
-        print(f"🎲 Batch noise preparation completed in {noise_time:.3f}s")
+        print(f"🎲 Shared latent preparation completed in {noise_time:.3f}s (same initial noise for all {batch_size} interpolation steps)")
 
         # Run denoising for all interpolated embeddings in parallel
         denoise_start = time.time()
