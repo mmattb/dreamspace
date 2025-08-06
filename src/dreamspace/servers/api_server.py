@@ -6,6 +6,7 @@ import time
 from io import BytesIO
 import traceback
 import time
+import torch
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
@@ -376,9 +377,6 @@ def create_app(backend_type: str = "kandinsky_local",
                 print("🚀 Serializing tensors for high-speed local transfer...")
                 encoding_start = time.time()
                 
-                import torch
-                from io import BytesIO
-                
                 # all_images is already a PyTorch tensor - no conversion needed!
                 tensor_data = all_images
                 
@@ -420,9 +418,6 @@ def create_app(backend_type: str = "kandinsky_local",
                 encoding_start = time.time()
 
                 def encode_single_image(args):
-                    from io import BytesIO  # Import inside function to avoid scope issues
-                    import base64
-                    import time
                     i, image = args
                     
                     # Time the JPEG encoding

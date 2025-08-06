@@ -13,6 +13,7 @@ import requests
 import numpy as np
 from io import BytesIO
 from PIL import Image
+import torch
 from typing import List, Optional, Dict, Any
 from .animation import (
     RhythmModulator, HeartbeatRhythm, BreathingRhythm, WaveRhythm, 
@@ -135,8 +136,6 @@ class AnimatedRemoteImgGen:
             if server_format == "tensor":
                 # Special handling for tensor format - single tensor contains all images
                 if len(result["images"]) > 0:
-                    import torch
-                    from io import BytesIO
                     
                     tensor_bytes = base64.b64decode(result["images"][0])  # Single tensor for whole batch
                     buffer = BytesIO(tensor_bytes)
