@@ -113,6 +113,34 @@ class WaveRhythm(RhythmModulator):
         return interval
 
 
+class LinearRhythm(RhythmModulator):
+    """Linear rhythm with consistent, steady intervals - perfect for interpolated sequences."""
+    
+    def __init__(self, interval: float = 1.5):
+        self.interval = interval
+        
+    def next_interval(self) -> float:
+        return self.interval
+
+
+class ContinuousLinearRhythm(RhythmModulator):
+    """Continuous linear rhythm with very short intervals for smooth, constant motion."""
+    
+    def __init__(self, speed: float = 3.0):
+        """
+        Args:
+            speed: Higher values = faster motion. 3.0 is a good moderate pace.
+                   Lower values (1.0-2.0) = slower, more meditative
+                   Higher values (4.0+) = faster transitions
+        """
+        self.speed = speed
+        # Very short intervals for smooth motion
+        self.interval = 0.05  # 50ms = 20fps for smooth animation
+        
+    def next_interval(self) -> float:
+        return self.interval
+
+
 class AnimationController:
     """Controls frame animation with rhythm-based transitions and interpolation."""
     

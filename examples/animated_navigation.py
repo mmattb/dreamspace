@@ -37,7 +37,7 @@ Controls:
   A: Toggle animation
   F: Cycle animation speed
   I: Toggle interpolation
-  1-4: Switch rhythm patterns
+  1-6: Switch rhythm patterns
   S: Save current frame
   X: Shuffle frame order
 """
@@ -51,7 +51,7 @@ from PIL import Image
 from screeninfo import get_monitors
 
 # Import from the main dreamspace library
-from dreamspace.core.animation import HeartbeatRhythm, BreathingRhythm, WaveRhythm
+from dreamspace.core.animation import HeartbeatRhythm, BreathingRhythm, WaveRhythm, LinearRhythm, ContinuousLinearRhythm
 from dreamspace.core.remote_generator import AnimatedRemoteImgGen
 from dreamspace.cli.navigation import (
     parse_arguments, get_image_dimensions, get_interactive_config, print_welcome_message
@@ -278,6 +278,13 @@ class DreamspaceNavigator:
                     return False
         
         gen_thread.join()
+        
+        # Set optimal rhythm for the animation type
+        if self.interpolation_mode and self.prompt2:
+            # Use continuous linear rhythm for smooth interpolated embeddings ping-pong
+            self.img_gen.animation_controller.set_rhythm_modulator(ContinuousLinearRhythm(speed=1.2))
+            print("🎵 Set Continuous Linear rhythm for interpolated embeddings ping-pong animation")
+        
         print("🖼️ Initial animation ready!")
         return True
     
@@ -400,6 +407,12 @@ class DreamspaceNavigator:
             
         elif key == pygame.K_4:
             self.img_gen.animation_controller.set_rhythm_modulator(HeartbeatRhythm(base_bpm=55))
+            
+        elif key == pygame.K_5:
+            self.img_gen.animation_controller.set_rhythm_modulator(LinearRhythm(interval=1.2))
+            
+        elif key == pygame.K_6:
+            self.img_gen.animation_controller.set_rhythm_modulator(ContinuousLinearRhythm(speed=2.5))
     
     def get_status(self):
         """Get current status information from the animation system."""
