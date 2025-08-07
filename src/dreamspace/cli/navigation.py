@@ -108,6 +108,11 @@ Examples:
         help="Output format: 'png' (default, lossless), 'jpeg', 'tensor' (fast local), or 'jpeg_optimized' (skip PIL)"
     )
     
+    parser.add_argument(
+        "--output-dir", type=str,
+        help="Directory to save all generated images (clears directory on each new batch)"
+    )
+    
     # Display options
     parser.add_argument(
         "--maximize", action="store_true",

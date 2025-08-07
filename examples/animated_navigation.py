@@ -29,6 +29,9 @@ Usage:
     
     # Run with custom noise magnitude and bifurcation step
     PYTHONPATH=src python examples/animated_navigation.py --noise-magnitude 0.5 --bifurcation-step 5
+    
+    # Save all images to a directory (clears directory on each new batch)
+    PYTHONPATH=src python examples/animated_navigation.py --output-dir ./generated_images
 
 Controls:
   Arrow Keys: Navigate parameter space
@@ -46,6 +49,8 @@ import pygame
 import time
 import threading
 import random
+import os
+import shutil
 from typing import List, Optional, Tuple
 from PIL import Image
 from screeninfo import get_monitors
@@ -69,7 +74,7 @@ class DreamspaceNavigator:
     
     def __init__(self, server_url: str, initial_prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, 
                  noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg",
-                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None):
+                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None, output_dir: str = None):
         self.server_url = server_url
         self.original_image_width, self.original_image_height = image_size
         self.batch_size = batch_size
@@ -80,6 +85,7 @@ class DreamspaceNavigator:
         self.maximize_window = maximize_window
         self.interpolation_mode = interpolation_mode
         self.prompt2 = prompt2
+        self.output_dir = output_dir
         
         # Initialize pygame
         pygame.init()
@@ -157,6 +163,12 @@ class DreamspaceNavigator:
         self.generation_thread: Optional[threading.Thread] = None
         
         print(f"✅ Navigator initialized: {self.image_width}x{self.image_height} → {self.window_width}x{self.window_height}")
+        
+        # Show output directory status
+        if self.output_dir:
+            print(f"📁 Output directory: {self.output_dir} (will be cleared on each batch)")
+        else:
+            print(f"📁 No output directory specified (images will not be saved to disk)")
     
     def show_image(self, img, window, target_width: int, target_height: int):
         """Display PIL Image in pygame window, scaling to fill screen while maintaining aspect ratio."""
@@ -220,6 +232,53 @@ class DreamspaceNavigator:
         if generation_status:
             gen_surface = self.font.render(generation_status, True, (255, 255, 0))
             self.window.blit(gen_surface, (10, self.window_height - 42))
+    
+    def save_images_to_directory(self):
+        """Save all current animation frames to the output directory."""
+        if not self.output_dir or not self.img_gen.has_frames():
+            return
+        
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            # Clear directory contents
+            for filename in os.listdir(self.output_dir):
+                file_path = os.path.join(self.output_dir, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    print(f"⚠️ Failed to delete {file_path}: {e}")
+            
+            # Save all current frames
+            frames = self.img_gen.current_frames
+            if frames:
+                print(f"💾 Saving {len(frames)} images to {self.output_dir}")
+                for i, frame in enumerate(frames):
+                    # Determine file extension based on output format
+                    if self.output_format.lower() == "jpeg":
+                        ext = "jpg"
+                    elif self.output_format.lower() == "png":
+                        ext = "png"
+                    else:
+                        ext = "png"  # Default fallback
+                    
+                    filename = f"frame_{i:04d}.{ext}"
+                    filepath = os.path.join(self.output_dir, filename)
+                    
+                    # Save with appropriate format and quality
+                    if ext == "jpg":
+                        frame.save(filepath, format='JPEG', quality=90, optimize=True)
+                    else:
+                        frame.save(filepath, format='PNG', optimize=True)
+                
+                print(f"✅ Saved {len(frames)} frames to {self.output_dir}")
+            
+        except Exception as e:
+            print(f"❌ Error saving images to directory: {e}")
     
     def generate_initial_batch(self):
         """Generate the initial animation batch."""
@@ -285,6 +344,9 @@ class DreamspaceNavigator:
             self.img_gen.animation_controller.set_rhythm_modulator(ContinuousLinearRhythm(speed=1.2))
             print("🎵 Set Continuous Linear rhythm for interpolated embeddings ping-pong animation")
         
+        # Save images to directory if specified
+        self.save_images_to_directory()
+        
         print("🖼️ Initial animation ready!")
         return True
     
@@ -317,6 +379,9 @@ class DreamspaceNavigator:
                     print(f"✅ Completed generation request {request_id}")
                     print(f"⏱️ Generation time: {duration:.2f} seconds ({duration/60:.1f} minutes)")
                     print(f"📊 Rate: {self.batch_size/duration:.1f} images/second")
+                    
+                    # Save images to directory if specified
+                    self.save_images_to_directory()
             except Exception as e:
                 end_time = time.time()
                 duration = end_time - start_time
@@ -527,6 +592,10 @@ def main():
     maximize_input = input("Maximize window to fill screen? (y/n, default=y): ").strip().lower()
     maximize_window = maximize_input != 'n'
     
+    # Ask user if they want to save images to a directory
+    output_dir_input = input("Save images to directory? (leave empty to skip): ").strip()
+    output_dir = output_dir_input if output_dir_input else None
+    
     navigator = DreamspaceNavigator(
         server_url=server_url,
         image_size=image_size,
@@ -535,7 +604,8 @@ def main():
         noise_magnitude=0.27,  # Updated default noise magnitude
         bifurcation_step=3,
         output_format="png",  # Use PNG default for better quality
-        maximize_window=maximize_window
+        maximize_window=maximize_window,
+        output_dir=output_dir
     )
     
     navigator.run()
@@ -568,6 +638,9 @@ def main_with_args():
     # Check if maximize option is available
     maximize_window = getattr(args, 'maximize', False)
     
+    # Get output directory if specified
+    output_dir = getattr(args, 'output_dir', None)
+    
     navigator = DreamspaceNavigator(
         server_url=server_url,
         image_size=image_size,
@@ -578,7 +651,8 @@ def main_with_args():
         output_format=output_format,
         maximize_window=maximize_window,
         interpolation_mode=interpolation_mode,
-        prompt2=prompt2
+        prompt2=prompt2,
+        output_dir=output_dir
     )
     
     # Set initial configuration
@@ -600,6 +674,9 @@ def main_with_args():
         print(f"🔀 Bifurcation Step: {navigator.bifurcation_step}")
     
     print(f"📄 Output Format: {navigator.output_format}")
+    
+    if navigator.output_dir:
+        print(f"📁 Images will be saved to: {navigator.output_dir}")
     
     navigator.run()
 

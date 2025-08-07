@@ -101,7 +101,7 @@ class AnimatedRemoteImgGen:
             "height": kwargs.get("height", 512),
             "num_inference_steps": kwargs.get("num_inference_steps", 20),
             "guidance_scale": kwargs.get("guidance_scale", 7.5),
-            "seed": kwargs.get("seed", 42),
+            "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
             "noise_magnitude": kwargs.get("noise_magnitude", 0.3),
             "bifurcation_step": kwargs.get("bifurcation_step", 3),
             "output_format": kwargs.get("output_format", "jpeg")
@@ -243,7 +243,7 @@ class AnimatedRemoteImgGen:
             "height": kwargs.get("height", 512),
             "num_inference_steps": kwargs.get("num_inference_steps", 20),
             "guidance_scale": kwargs.get("guidance_scale", 7.5),
-            "seed": kwargs.get("seed", 42),
+            "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
             "output_format": kwargs.get("output_format", "jpeg")
         }
         
