@@ -114,21 +114,21 @@ class ImgGen:
         if backend_type == "sd_local":
             # Redirect to server backend (local backend deprecated)
             print("⚠️  sd_local backend deprecated, using sd15_server instead")
-            from ..backends.stable_diffusion.sd15_server_backend import StableDiffusion15ServerBackend
+            from ..backends.server.sd15_server_backend import StableDiffusion15ServerBackend
             return StableDiffusion15ServerBackend(config=self.config, **kwargs)
         elif backend_type == "sd15_server":
-            from ..backends.stable_diffusion.sd15_server_backend import StableDiffusion15ServerBackend
+            from ..backends.server.sd15_server_backend import StableDiffusion15ServerBackend
             return StableDiffusion15ServerBackend(config=self.config, **kwargs)
         elif backend_type == "sd21_server":
-            from ..backends.stable_diffusion.sd21_server_backend import StableDiffusion21ServerBackend
+            from ..backends.server.sd21_server_backend import StableDiffusion21ServerBackend
             return StableDiffusion21ServerBackend(config=self.config, **kwargs)
         elif backend_type == "kandinsky_local":
             # Redirect to server backend (local backend deprecated)
             print("⚠️  kandinsky_local backend deprecated, using kandinsky21_server instead")
-            from ..backends.kandinsky.kandinsky21_server_backend import Kandinsky21ServerBackend
+            from ..backends.server.kandinsky21_server_backend import Kandinsky21ServerBackend
             return Kandinsky21ServerBackend(config=self.config, **kwargs)
         elif backend_type == "kandinsky21_server":
-            from ..backends.kandinsky.kandinsky21_server_backend import Kandinsky21ServerBackend
+            from ..backends.server.kandinsky21_server_backend import Kandinsky21ServerBackend
             return Kandinsky21ServerBackend(config=self.config, **kwargs)
         elif backend_type == "remote":
             from ..backends.remote.api_backend import RemoteBackend
