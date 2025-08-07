@@ -38,7 +38,7 @@ class ServerConfig:
     port: int = 8000
     workers: int = 1
     max_batch_size: int = 4
-    timeout: int = 300
+    timeout: int = 7200  # 2 hours for large batches
     enable_cors: bool = True
 
 
@@ -47,7 +47,7 @@ class RemoteConfig:
     """Configuration for remote API access."""
     api_url: str
     api_key: Optional[str] = None
-    timeout: int = 60
+    timeout: int = 7200  # 2 hours for large batches
     max_retries: int = 3
 
 

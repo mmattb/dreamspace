@@ -25,12 +25,12 @@ server:
   port: 8000
   workers: 1
   max_batch_size: 4
-  timeout: 300
+  timeout: 7200  # 2 hours for large batches
   enable_cors: true
 
 # Uncomment and configure for remote API access
 # remote:
 #   api_url: "https://your-api-server.com/api"
 #   api_key: "your-api-key"
-#   timeout: 60
+#   timeout: 7200  # 2 hours for large batches
 #   max_retries: 3

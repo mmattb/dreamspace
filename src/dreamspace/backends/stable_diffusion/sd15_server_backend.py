@@ -733,7 +733,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             # Create negative embeddings for this sub-batch
             negative_embedding = self._extract_text_embeddings("")
             batch_negative_embeds = negative_embedding.repeat(current_sub_batch_size, 1, 1)
-            batch_combined_embeds = torch.cat([batch_negative_embeds, batch_prompt_embeds])
+            batch_combined_embeds = torch.cat([batch_negative_embeds, batch_prompt_embeds], dim=0)
             
             # Create latents for this sub-batch (same initial latent repeated)
             sub_batch_latents = single_latent.repeat(current_sub_batch_size, 1, 1, 1)
