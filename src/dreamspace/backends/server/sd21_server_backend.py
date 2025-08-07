@@ -746,7 +746,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             all_final_latents.append(sub_batch_latents)
             
             # Clean up sub-batch tensors
-            del sub_batch_latents, batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
+            del batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
             torch.cuda.empty_cache()  # Free GPU memory between sub-batches
         
         # Combine all sub-batch results
@@ -766,8 +766,6 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             decode_end_idx = min(decode_idx + decode_sub_batch_size, total_batch_size)
             
             decode_latents = final_latents_batch[decode_idx:decode_end_idx]
-            # Ensure decode_latents is on the same device as the VAE
-            decode_latents = decode_latents.to(self.pipe.device)
             decoded_images = self.pipe.vae.decode(decode_latents / 0.18215).sample
             
             decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
@@ -775,6 +773,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             
             del decode_latents, decoded_images
             torch.cuda.empty_cache()
+
+        del final_latents_batch, all_final_latents
         
         # Combine all decoded images
         final_images = torch.cat(all_decoded_images, dim=0)
