@@ -796,6 +796,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             decode_end_idx = min(decode_idx + decode_sub_batch_size, total_batch_size)
             
             decode_latents = final_latents_batch[decode_idx:decode_end_idx]
+            # Ensure decode_latents is on the same device as the VAE
+            decode_latents = decode_latents.to(self.pipe.device)
             
             with torch.no_grad():
                 decode_latents.requires_grad_(False)
