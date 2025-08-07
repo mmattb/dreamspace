@@ -750,7 +750,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             all_final_latents.append(sub_batch_latents)  # Keep on GPU
             
             # Clean up sub-batch tensors
-            del sub_batch_latents, batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
+            del batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
             torch.cuda.empty_cache()  # Free GPU memory between sub-batches
         
         # Combine all sub-batch results
@@ -777,6 +777,8 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             
             del decode_latents, decoded_images
             torch.cuda.empty_cache()
+
+        del final_latents_batch, all_final_latents
         
         # Combine all decoded images
         final_images = torch.cat(all_decoded_images, dim=0)

@@ -788,7 +788,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             print(f"🚀 Returning tensor format for ultra-fast serialization")
         else:
             # Convert to PIL Images
-            images = final_images.permute(0, 2, 3, 1).float().numpy()
+            images = final_images.permute(0, 2, 3, 1).cpu().float().numpy()
             pil_images = []
             for i in range(images.shape[0]):
                 image_array = (images[i] * 255).astype('uint8')
