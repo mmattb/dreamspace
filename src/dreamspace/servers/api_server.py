@@ -50,6 +50,7 @@ class GenerateBatchRequest(BaseModel):
     noise_magnitude: Optional[float] = Field(0.3, description="Magnitude of noise for latent variations")
     bifurcation_step: Optional[int] = Field(3, description="Number of steps from end to bifurcate in bifurcated wiggle")
     output_format: Optional[str] = Field("png", description="Output format: 'png' (base64), 'jpeg' (base64), or 'tensor' (numpy)")
+    latent_cookie: Optional[int] = Field(None, description="Cookie for shared latent across batches")
 
 
 class GenerateInterpolatedEmbeddingsRequest(BaseModel):
@@ -62,6 +63,7 @@ class GenerateInterpolatedEmbeddingsRequest(BaseModel):
     height: Optional[int] = Field(768, description="Image height")
     seed: Optional[int] = Field(None, description="Base seed for variations")
     output_format: Optional[str] = Field("png", description="Output format: 'png' (base64), 'jpeg' (base64), or 'tensor' (numpy)")
+    latent_cookie: Optional[int] = Field(None, description="Cookie for shared latent across batches")
 
 
 class BatchImageResponse(BaseModel):
@@ -375,6 +377,7 @@ def create_app(backend_type: str = "kandinsky_local",
                 noise_magnitude=request.noise_magnitude,
                 bifurcation_step=request.bifurcation_step,
                 output_format="tensor" if request.output_format == "tensor" else "pil",
+                latent_cookie=request.latent_cookie,
                 **gen_params
             )
 
@@ -579,7 +582,8 @@ def create_app(backend_type: str = "kandinsky_local",
                 num_inference_steps=request.num_inference_steps,
                 width=request.width,
                 height=request.height,
-                seed=request.seed
+                seed=request.seed,
+                latent_cookie=request.latent_cookie
             )
 
             # Handle different output formats similar to generate_batch
