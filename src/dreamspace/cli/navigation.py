@@ -123,6 +123,11 @@ Examples:
         help="Integer cookie for shared latent across all batches (maintains consistent composition)"
     )
     
+    parser.add_argument(
+        "--seed", type=int,
+        help="Random seed for consistent generation (if not provided, will be randomly generated)"
+    )
+    
     # Display options
     parser.add_argument(
         "--maximize", action="store_true",

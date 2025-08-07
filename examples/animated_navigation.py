@@ -33,8 +33,12 @@ Usage:
     # Save all images to a directory (clears directory on each new batch)
     PYTHONPATH=src python examples/animated_navigation.py --output-dir ./generated_images
     
-    # Multi-prompt interpolation sequence with looping
-    PYTHONPATH=src python examples/animated_navigation.py --prompt-list "forest scene" "desert landscape" "ocean view" "mountain vista" --batch-size 8 --output-dir ./sequence
+    # Multi-prompt interpolation sequence with looping and consistent composition
+    PYTHONPATH=src python examples/animated_navigation.py --prompt-list "forest scene" "desert landscape" "ocean view" "mountain vista" --batch-size 8 --output-dir ./sequence --latent-cookie 12345 --seed 42
+    
+    
+    # Multi-prompt interpolation sequence with looping and consistent composition
+    PYTHONPATH=src python examples/animated_navigation.py --prompt-list "forest scene" "desert landscape" "ocean view" "mountain vista" --batch-size 8 --output-dir ./sequence --latent-cookie 12345 --seed 42
 
 Controls:
   Arrow Keys: Navigate parameter space
@@ -57,36 +61,7 @@ import shutil
 from typing import List, Optional, Tuple
 from PIL import Image
 from screeninfo import get_monitors
-
-try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-    # Fallback tqdm that just prints updates
-    class tqdm:
-        def __init__(self, total=None, desc="", unit=""):
-            self.total = total
-            self.desc = desc
-            self.current = 0
-            print(f"{desc}: 0/{total}")
-        
-        def update(self, n=1):
-            self.current += n
-            print(f"{self.desc}: {self.current}/{self.total}")
-        
-        def set_description(self, desc):
-            self.desc = desc
-        
-        def set_postfix(self, postfix_dict):
-            postfix_str = " | ".join([f"{k}: {v}" for k, v in postfix_dict.items()])
-            print(f"  {postfix_str}")
-        
-        def __enter__(self):
-            return self
-        
-        def __exit__(self, *args):
-            pass
+from tqdm import tqdm
 
 # Import from the main dreamspace library
 from dreamspace.core.animation import HeartbeatRhythm, BreathingRhythm, WaveRhythm, LinearRhythm, ContinuousLinearRhythm
@@ -107,7 +82,7 @@ class DreamspaceNavigator:
     
     def __init__(self, server_url: str, initial_prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, 
                  noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg",
-                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None, output_dir: str = None, prompt_list: List[str] = None, latent_cookie: int = None):
+                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None, output_dir: str = None, prompt_list: List[str] = None, latent_cookie: int = None, seed: int = None):
         self.server_url = server_url
         self.original_image_width, self.original_image_height = image_size
         self.batch_size = batch_size
@@ -121,6 +96,7 @@ class DreamspaceNavigator:
         self.output_dir = output_dir
         self.prompt_list = prompt_list
         self.latent_cookie = latent_cookie
+        self.seed = seed
         
         # Multi-prompt sequence state
         self.is_multi_prompt_mode = prompt_list is not None and len(prompt_list) > 1
@@ -199,6 +175,11 @@ class DreamspaceNavigator:
         if self.latent_cookie is not None:
             self.generation_params["latent_cookie"] = self.latent_cookie
             print(f"🍪 Using latent cookie {self.latent_cookie} for consistent composition")
+        
+        # Add seed if specified  
+        if self.seed is not None:
+            self.generation_params["seed"] = self.seed
+            print(f"🎲 Using seed {self.seed} for consistent generation")
         
         # Prompt state
         self.current_prompt = initial_prompt
@@ -425,6 +406,14 @@ class DreamspaceNavigator:
             latent_cookie = random.randint(1, 1000000)
             print(f"🍪 Generated latent cookie {latent_cookie} for consistent composition across sequence")
         
+        # Use a shared seed for the entire sequence to maintain consistency
+        if self.seed is not None:
+            shared_seed = self.seed
+            print(f"🎲 Using user-specified seed {shared_seed} for consistent generation across all segments")
+        else:
+            shared_seed = random.randint(0, 2**32 - 1)
+            print(f"🎲 Generated shared seed {shared_seed} for consistent generation across all segments")
+        
         with tqdm(total=len(prompt_pairs), desc="Generating interpolations", unit="segment") as pbar:
             for i, (prompt1, prompt2) in enumerate(prompt_pairs):
                 segment_start_time = time.time()
@@ -441,6 +430,7 @@ class DreamspaceNavigator:
                         batch_size=self.batch_size,
                         request_id=request_id,
                         latent_cookie=latent_cookie,
+                        seed=shared_seed,
                         **self.generation_params
                     )
                     
@@ -875,7 +865,8 @@ def main_with_args():
         prompt2=prompt2,
         output_dir=output_dir,
         prompt_list=prompt_list,
-        latent_cookie=getattr(args, 'latent_cookie', None)
+        latent_cookie=getattr(args, 'latent_cookie', None),
+        seed=getattr(args, 'seed', None)
     )
     
     # Set initial configuration
