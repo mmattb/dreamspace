@@ -780,10 +780,10 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
             all_decoded_images.append(decoded_images)  # Keep on GPU
             
-            del decode_latents, decoded_images
+            del decode_latents
             torch.cuda.empty_cache()
 
-        del final_latents_batch, all_final_latents
+        del all_final_latents
         
         # Combine all decoded images
         final_images = torch.cat(all_decoded_images, dim=0)
