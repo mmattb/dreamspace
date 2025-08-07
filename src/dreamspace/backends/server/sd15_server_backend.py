@@ -715,6 +715,10 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             
             print(f"🔄 Processing sub-batch {sub_batch_idx//sub_batch_size + 1}/{(total_batch_size + sub_batch_size - 1)//sub_batch_size}: images {sub_batch_idx}-{end_idx-1}")
             
+            # IMPORTANT: Reset scheduler state for each sub-batch to avoid tensor size mismatches
+            # The scheduler maintains internal state that gets confused with different batch sizes
+            self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+            
             # Get embeddings for this sub-batch
             sub_batch_embeddings = interpolated_embeddings[sub_batch_idx:end_idx]
             batch_prompt_embeds = torch.cat(sub_batch_embeddings, dim=0)
