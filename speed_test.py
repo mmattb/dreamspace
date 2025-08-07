@@ -87,6 +87,13 @@ Examples:
         help="Initial prompt for image generation"
     )
     
+    # Model selection
+    parser.add_argument(
+        "--model", type=str, default="sd15_server",
+        choices=["sd15_server", "sd21_server", "kandinsky21_server"],
+        help="Model to use for generation (default: sd15_server)"
+    )
+    
     # Interpolated embeddings mode
     parser.add_argument(
         "--prompt2", type=str, 
