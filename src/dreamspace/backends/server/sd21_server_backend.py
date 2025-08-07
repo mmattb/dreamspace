@@ -743,14 +743,14 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
                 del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
             # Store the final latents for this sub-batch
-            all_final_latents.append(sub_batch_latents.cpu())  # Move to CPU to free GPU memory
+            all_final_latents.append(sub_batch_latents)
             
             # Clean up sub-batch tensors
             del sub_batch_latents, batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
             torch.cuda.empty_cache()  # Free GPU memory between sub-batches
         
         # Combine all sub-batch results
-        final_latents_batch = torch.cat(all_final_latents, dim=0).to(self.pipe.device)
+        final_latents_batch = torch.cat(all_final_latents, dim=0)
         
         denoise_time = time.time() - denoise_start
         print(f"🧠 Sub-batched denoising ({num_inference_steps} steps × {total_batch_size} interpolations) completed in {denoise_time:.3f}s")
@@ -771,7 +771,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             decoded_images = self.pipe.vae.decode(decode_latents / 0.18215).sample
             
             decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
-            all_decoded_images.append(decoded_images.cpu())
+            all_decoded_images.append(decoded_images)
             
             del decode_latents, decoded_images
             torch.cuda.empty_cache()
