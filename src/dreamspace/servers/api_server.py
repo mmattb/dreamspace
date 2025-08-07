@@ -56,6 +56,11 @@ class GenerateInterpolatedEmbeddingsRequest(BaseModel):
     prompt1: str = Field(..., description="Starting text prompt for interpolation")
     prompt2: str = Field(..., description="Ending text prompt for interpolation")
     batch_size: int = Field(..., description="Number of interpolation steps (including start and end)")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+    width: Optional[int] = Field(768, description="Image width")
+    height: Optional[int] = Field(768, description="Image height")
+    seed: Optional[int] = Field(None, description="Base seed for variations")
     output_format: Optional[str] = Field("png", description="Output format: 'png' (base64), 'jpeg' (base64), or 'tensor' (numpy)")
 
 
@@ -569,7 +574,12 @@ def create_app(backend_type: str = "kandinsky_local",
                 prompt1=request.prompt1,
                 prompt2=request.prompt2,
                 batch_size=request.batch_size,
-                output_format=request.output_format
+                output_format=request.output_format,
+                guidance_scale=request.guidance_scale,
+                num_inference_steps=request.num_inference_steps,
+                width=request.width,
+                height=request.height,
+                seed=request.seed
             )
 
             # Handle different output formats similar to generate_batch
