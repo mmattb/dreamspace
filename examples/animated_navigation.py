@@ -529,7 +529,7 @@ def main():
     
     navigator = DreamspaceNavigator(
         server_url=server_url,
-        image_size=(2048, 1280),
+        image_size=image_size,
         batch_size=2,  # Set default back to 2 for interactive mode
         initial_prompt="strange bright forest land, steampunk trees",
         noise_magnitude=0.27,  # Updated default noise magnitude
@@ -570,7 +570,7 @@ def main_with_args():
     
     navigator = DreamspaceNavigator(
         server_url=server_url,
-        image_size=(2048, 1280),
+        image_size=image_size,
         batch_size=batch_size,
         initial_prompt=initial_prompt,
         noise_magnitude=args.noise_magnitude,
