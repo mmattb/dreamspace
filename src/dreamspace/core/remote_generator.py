@@ -125,7 +125,7 @@ class AnimatedRemoteImgGen:
             response = requests.post(
                 f"{self.server_url}/generate_batch",
                 json=request_data,
-                timeout=300
+                timeout=7200  # 2 hours for large batches
             )
             
             # Check for cancellation after request
@@ -267,7 +267,7 @@ class AnimatedRemoteImgGen:
             response = requests.post(
                 f"{self.server_url}/generate_interpolated_embeddings",
                 json=request_data,
-                timeout=300
+                timeout=7200  # 2 hours for large interpolation batches
             )
             
             # Check for cancellation after request
