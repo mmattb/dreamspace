@@ -124,17 +124,17 @@ def validate_arguments(args: argparse.Namespace) -> bool:
         print("❌ Error: At least 2 prompts are required for interpolation")
         return False
     
-    if args.batch_size < 1 or args.batch_size > 32:
-        print("❌ Error: Batch size must be between 1 and 32")
-        return False
+    #if args.batch_size < 1 or args.batch_size > 32:
+    #    print("❌ Error: Batch size must be between 1 and 32")
+    #    return False
     
-    if args.width < 256 or args.width > 2048 or args.width % 64 != 0:
-        print("❌ Error: Width must be between 256-2048 and divisible by 64")
-        return False
-        
-    if args.height < 256 or args.height > 2048 or args.height % 64 != 0:
-        print("❌ Error: Height must be between 256-2048 and divisible by 64")
-        return False
+    #if args.width < 256 or args.width > 2048 or args.width % 64 != 0:
+    #    print("❌ Error: Width must be between 256-2048 and divisible by 64")
+    #    return False
+    #    
+    #if args.height < 256 or args.height > 2048 or args.height % 64 != 0:
+    #    print("❌ Error: Height must be between 256-2048 and divisible by 64")
+    #    return False
     
     if args.guidance_scale < 1.0 or args.guidance_scale > 20.0:
         print("❌ Error: Guidance scale must be between 1.0 and 20.0")
@@ -153,14 +153,8 @@ def send_async_request(args: argparse.Namespace) -> bool:
     try:
         print(f"🚀 Connecting to server: {args.server}")
         
-        # Initialize the remote generator
+        # Initialize the remote generator (connection is tested automatically)
         generator = AnimatedRemoteImgGen(args.server, args.model)
-        
-        # Test connection
-        if not generator.test_connection():
-            print(f"❌ Failed to connect to server at {args.server}")
-            print("💡 Check that the server is running and the URL is correct")
-            return False
         
         print(f"✅ Connected successfully!")
         print(f"📝 Prompts: {args.prompts}")

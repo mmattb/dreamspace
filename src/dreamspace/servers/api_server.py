@@ -575,8 +575,7 @@ def create_app(backend_type: str = "sd15_server",
         try:
             img_gen = get_model_backend(request.model)
 
-            # Limit batch size for server stability
-            batch_size = min(request.batch_size, 32)
+            batch_size = request.batch_size
 
             # Prepare generation parameters
             gen_params = {
@@ -869,8 +868,8 @@ def create_app(backend_type: str = "sd15_server",
             if len(request.prompts) < 2:
                 raise HTTPException(status_code=400, detail="At least 2 prompts are required")
             
-            if request.batch_size < 1 or request.batch_size > 32:
-                raise HTTPException(status_code=400, detail="Batch size must be between 1 and 32")
+            #if request.batch_size < 1 or request.batch_size > 32:
+            #    raise HTTPException(status_code=400, detail="Batch size must be between 1 and 32")
             
             # Generate unique job ID
             job_id = str(uuid.uuid4())
