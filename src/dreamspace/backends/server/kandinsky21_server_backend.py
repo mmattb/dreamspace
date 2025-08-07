@@ -139,7 +139,12 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 print("✅ VAE slicing enabled for Kandinsky 2.1")
         except Exception:
             print("⚠️ VAE slicing not available")
-        
+         
+        # Force all models to eval mode
+        self.pipe.unet.eval()
+        self.pipe.vae.eval() 
+        self.pipe.text_encoder.eval()
+
         print(f"✅ Kandinsky 2.1 loaded successfully on {self.device}!")
     
     @no_grad_method
@@ -161,18 +166,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         
         # Setup phase
         setup_start = time.time()
-        
-        # Force all models to eval mode
-        self.pipe.unet.eval()
-        if hasattr(self.pipe, 'vae') and self.pipe.vae is not None:
-            self.pipe.vae.eval()
-        if hasattr(self.pipe, 'text_encoder') and self.pipe.text_encoder is not None:
-            self.pipe.text_encoder.eval()
-        
-        # Enable VAE slicing if available
-        if hasattr(self.pipe, 'vae') and hasattr(self.pipe.vae, 'enable_slicing'):
-            self.pipe.vae.enable_slicing()
-
+       
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
@@ -258,11 +252,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-            # Use torch.no_grad() to prevent gradient accumulation
-            with torch.no_grad():
-                noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=prompt_embeds
-                ).sample
+            noise_pred = self.pipe.unet(
+                latent_input, t, encoder_hidden_states=prompt_embeds
+            ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -303,11 +295,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_input = torch.cat([latents_batch] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-            # Use torch.no_grad() to prevent gradient accumulation
-            with torch.no_grad():
-                noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=batch_prompt_embeds
-                ).sample
+            noise_pred = self.pipe.unet(
+                latent_input, t, encoder_hidden_states=batch_prompt_embeds
+            ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -323,14 +313,10 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Step 7: Decode the batch of latents to images
         decode_start = time.time()
         
-        # Use direct VAE decode with explicit no_grad
         vae_start = time.time()
-        with torch.no_grad():
-            # Ensure no computation graph is built
-            latents_batch.requires_grad_(False)
-            # Kandinsky uses different VAE scaling
-            vae_scale_factor = getattr(self.pipe, 'vae_scale_factor', 0.18215)
-            images = self.pipe.vae.decode(latents_batch / vae_scale_factor).sample
+        # Kandinsky uses different VAE scaling
+        vae_scale_factor = getattr(self.pipe, 'vae_scale_factor', 0.18215)
+        images = self.pipe.vae.decode(latents_batch / vae_scale_factor).sample
         vae_time = time.time() - vae_start
         print(f"🔮 VAE decode completed in {vae_time:.3f}s")
         
@@ -431,18 +417,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         
         # Setup phase
         setup_start = time.time()
-        
-        # Force all models to eval mode
-        self.pipe.unet.eval()
-        if hasattr(self.pipe, 'vae') and self.pipe.vae is not None:
-            self.pipe.vae.eval()
-        if hasattr(self.pipe, 'text_encoder') and self.pipe.text_encoder is not None:
-            self.pipe.text_encoder.eval()
-        
-        # Enable VAE slicing if available
-        if hasattr(self.pipe, 'vae') and hasattr(self.pipe.vae, 'enable_slicing'):
-            self.pipe.vae.enable_slicing()
-
+       
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
@@ -557,10 +532,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_input = torch.cat([latents_batch] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-            with torch.no_grad():
-                noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=batch_combined_embeds
-                ).sample
+            noise_pred = self.pipe.unet(
+                latent_input, t, encoder_hidden_states=batch_combined_embeds
+            ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -576,13 +550,10 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Decode the batch of latents to images
         decode_start = time.time()
         
-        # Use direct VAE decode with explicit no_grad
         vae_start = time.time()
-        with torch.no_grad():
-            latents_batch.requires_grad_(False)
-            # Kandinsky uses different VAE scaling
-            vae_scale_factor = getattr(self.pipe, 'vae_scale_factor', 0.18215)
-            images = self.pipe.vae.decode(latents_batch / vae_scale_factor).sample
+        # Kandinsky uses different VAE scaling
+        vae_scale_factor = getattr(self.pipe, 'vae_scale_factor', 0.18215)
+        images = self.pipe.vae.decode(latents_batch / vae_scale_factor).sample
         vae_time = time.time() - vae_start
         print(f"🔮 VAE decode completed in {vae_time:.3f}s")
         
@@ -665,15 +636,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         
         # Setup phase (same as original)
         setup_start = time.time()
-        self.pipe.unet.eval()
-        if hasattr(self.pipe, 'vae') and self.pipe.vae is not None:
-            self.pipe.vae.eval()
-        if hasattr(self.pipe, 'text_encoder') and self.pipe.text_encoder is not None:
-            self.pipe.text_encoder.eval()
-        
-        # Enable VAE slicing if available
-        if hasattr(self.pipe, 'vae') and hasattr(self.pipe.vae, 'enable_slicing'):
-            self.pipe.vae.enable_slicing()
 
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
@@ -772,10 +734,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 latent_input = torch.cat([sub_batch_latents] * 2)
                 latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-                with torch.no_grad():
-                    noise_pred = self.pipe.unet(
-                        latent_input, t, encoder_hidden_states=batch_combined_embeds
-                    ).sample
+                noise_pred = self.pipe.unet(
+                    latent_input, t, encoder_hidden_states=batch_combined_embeds
+                ).sample
 
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -786,14 +747,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
             # Store the final latents for this sub-batch
-            all_final_latents.append(sub_batch_latents.cpu())  # Move to CPU to free GPU memory
+            all_final_latents.append(sub_batch_latents)  # Keep on GPU
             
             # Clean up sub-batch tensors
             del sub_batch_latents, batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
             torch.cuda.empty_cache()  # Free GPU memory between sub-batches
         
         # Combine all sub-batch results
-        final_latents_batch = torch.cat(all_final_latents, dim=0).to(self.pipe.device)
+        final_latents_batch = torch.cat(all_final_latents, dim=0)
         
         denoise_time = time.time() - denoise_start
         print(f"🧠 Sub-batched denoising ({num_inference_steps} steps × {total_batch_size} interpolations) completed in {denoise_time:.3f}s")
@@ -812,14 +773,12 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             # Ensure decode_latents is on the same device as the VAE
             decode_latents = decode_latents.to(self.pipe.device)
             
-            with torch.no_grad():
-                decode_latents.requires_grad_(False)
-                # Kandinsky uses different VAE scaling
-                vae_scale_factor = getattr(self.pipe, 'vae_scale_factor', 0.18215)
-                decoded_images = self.pipe.vae.decode(decode_latents / vae_scale_factor).sample
+            # Kandinsky uses different VAE scaling
+            vae_scale_factor = getattr(self.pipe, 'vae_scale_factor', 0.18215)
+            decoded_images = self.pipe.vae.decode(decode_latents / vae_scale_factor).sample
             
             decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
-            all_decoded_images.append(decoded_images.cpu())
+            all_decoded_images.append(decoded_images)  # Keep on GPU
             
             del decode_latents, decoded_images
             torch.cuda.empty_cache()
@@ -832,11 +791,11 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
         # Handle output format processing
         if output_format == "tensor":
-            images = final_images.to(self.pipe.device)  # Move back to GPU for output
+            images = final_images  # Already on GPU
             print(f"🚀 Returning tensor format for ultra-fast serialization")
         else:
             # Convert to PIL Images
-            images = final_images.permute(0, 2, 3, 1).float().numpy()
+            images = final_images.cpu().permute(0, 2, 3, 1).float().numpy()  # Move to CPU for PIL conversion
             pil_images = []
             for i in range(images.shape[0]):
                 image_array = (images[i] * 255).astype('uint8')
@@ -898,14 +857,13 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     return_tensors="pt"
                 )
                 
-                with torch.no_grad():
-                    if hasattr(self.pipe, 'text_encoder') and self.pipe.text_encoder is not None:
-                        text_embeddings = self.pipe.text_encoder(
-                            text_inputs.input_ids.to(self.pipe.device)
-                        )[0]
-                    else:
-                        # Fallback for different Kandinsky architecture
-                        return None
+                if hasattr(self.pipe, 'text_encoder') and self.pipe.text_encoder is not None:
+                    text_embeddings = self.pipe.text_encoder(
+                        text_inputs.input_ids.to(self.pipe.device)
+                    )[0]
+                else:
+                    # Fallback for different Kandinsky architecture
+                    return None
                 
                 return text_embeddings
             else:
