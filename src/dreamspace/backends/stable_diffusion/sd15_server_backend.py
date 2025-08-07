@@ -39,6 +39,52 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         self._load_pipelines()
     
+    def _calculate_sub_batch_size(self, total_batch_size: int, width: int, height: int) -> int:
+        """Calculate optimal sub-batch size based on memory heuristics.
+        
+        Args:
+            total_batch_size: Total number of images to generate
+            width: Image width in pixels
+            height: Image height in pixels
+            
+        Returns:
+            Optimal sub-batch size (1 to total_batch_size)
+        """
+        # Calculate megapixels per image
+        megapixels = (width * height) / 1_000_000
+        
+        # Rough heuristic: Base memory budget in GB (conservative estimate)
+        # SD 1.5 uses roughly 4-6GB base, leave some room for operations
+        available_memory_gb = 8.0  # Conservative estimate for typical GPU
+        
+        # Estimate memory usage per image during generation
+        # SD 1.5 latents are 1/8 resolution, 4 channels, float16
+        latent_megapixels = megapixels / 64  # 8x8 downsampling
+        
+        # Memory estimates (rough):
+        # - Latents: latent_megapixels * 4 channels * 2 bytes (float16) 
+        # - UNet activations: ~3x latent size during forward pass
+        # - VAE decode: ~6x latent size (RGB output)
+        # - Overhead: 2x for gradient computation, attention maps, etc.
+        
+        memory_per_image_mb = latent_megapixels * 4 * 2 * (3 + 6 + 2)  # Conservative estimate
+        memory_per_image_gb = memory_per_image_mb / 1000
+        
+        # Calculate how many images we can fit in memory
+        max_parallel_images = max(1, int(available_memory_gb / memory_per_image_gb))
+        
+        # Don't exceed the total batch size
+        sub_batch_size = min(max_parallel_images, total_batch_size)
+        
+        # Apply some practical limits
+        sub_batch_size = max(1, min(sub_batch_size, 16))  # Never more than 16 per sub-batch
+        
+        print(f"📊 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):")
+        print(f"   Estimated {memory_per_image_gb:.2f}GB per image")
+        print(f"   Sub-batch size: {sub_batch_size} (from total {total_batch_size})")
+        
+        return sub_batch_size
+    
     def _load_pipelines(self):
         """Load the diffusion pipelines using AutoPipeline."""
         from diffusers import AutoPipelineForText2Image
@@ -460,6 +506,19 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 generator=generator,
             )
         
+        # Calculate optimal sub-batch size for memory management
+        sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
+        
+        # If sub-batching is needed
+        if sub_batch_size < batch_size:
+            print(f"🔄 Using sub-batching: {batch_size} images in chunks of {sub_batch_size}")
+            return self._generate_interpolated_embeddings_with_sub_batching(
+                prompt1, prompt2, batch_size, sub_batch_size, output_format, latent_cookie, **kwargs
+            )
+        
+        # Original single-batch logic for when no sub-batching is needed
+        print(f"🚀 Processing full batch of {batch_size} images (no sub-batching needed)")
+        
         # Repeat the same latent for all interpolation steps
         latents_batch = single_latent.repeat(batch_size, 1, 1, 1)
         
@@ -569,6 +628,224 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 'format': 'pil', 
                 'latents': latents_batch,
                 'embeddings': batch_prompt_embeds
+            }
+    
+    def _generate_interpolated_embeddings_with_sub_batching(self, prompt1: str, prompt2: str, 
+                                                           total_batch_size: int, sub_batch_size: int,
+                                                           output_format: str, latent_cookie: Optional[int],
+                                                           **kwargs) -> Dict[str, Any]:
+        """Generate interpolated embeddings using sub-batching for memory efficiency."""
+        
+        total_start = time.time()
+        print(f"🔄 Sub-batching {total_batch_size} images into chunks of {sub_batch_size}")
+        
+        # Setup phase (same as original)
+        setup_start = time.time()
+        self.pipe.unet.eval()
+        self.pipe.vae.eval() 
+        self.pipe.text_encoder.eval()
+        
+        if hasattr(self.pipe.vae, 'enable_slicing'):
+            self.pipe.vae.enable_slicing()
+
+        # Set default generator for reproducibility on the correct device
+        if 'generator' not in kwargs and 'seed' in kwargs:
+            seed = kwargs.pop('seed')
+            device = self.device if hasattr(self, 'device') else 'cuda'
+            kwargs['generator'] = torch.Generator(device=device).manual_seed(seed)
+
+        generator = kwargs.get('generator')
+        guidance_scale = kwargs.get('guidance_scale', 7.5)
+        height = kwargs.get('height', 512)
+        width = kwargs.get('width', 512)
+        num_inference_steps = kwargs.get('num_inference_steps', 50)
+
+        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+        setup_time = time.time() - setup_start
+        
+        # Extract embeddings once (shared across all sub-batches)
+        encode_start = time.time()
+        embedding1 = self._extract_text_embeddings(prompt1)
+        embedding2 = self._extract_text_embeddings(prompt2)
+        
+        if embedding1 is None or embedding2 is None:
+            raise ValueError("Failed to extract text embeddings from prompts")
+        
+        # Create ALL interpolated embeddings first
+        interpolated_embeddings = []
+        alphas = torch.linspace(0, 1, steps=total_batch_size)
+        print(f"🔍 Creating {total_batch_size} interpolation steps from '{prompt1}' to '{prompt2}'")
+        
+        for i, alpha in enumerate(alphas):
+            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
+            interpolated_embeddings.append(interpolated)
+        
+        encode_time = time.time() - encode_start
+        print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
+
+        # Get shared latent once
+        noise_start = time.time()
+        if latent_cookie is not None:
+            latent_key = (latent_cookie, height, width)
+            if latent_key in self.latent_cache:
+                print(f"🍪 Using cached latent for cookie {latent_cookie}")
+                single_latent = self.latent_cache[latent_key].clone()
+            else:
+                print(f"🍪 Creating new latent for cookie {latent_cookie}")
+                single_latent = self.pipe.prepare_latents(
+                    batch_size=1,
+                    num_channels_latents=self.pipe.unet.config.in_channels,
+                    height=height,
+                    width=width,
+                    dtype=self.pipe.unet.dtype,
+                    device=self.pipe.device,
+                    generator=generator,
+                )
+                self.latent_cache[latent_key] = single_latent.clone()
+        else:
+            single_latent = self.pipe.prepare_latents(
+                batch_size=1,
+                num_channels_latents=self.pipe.unet.config.in_channels,
+                height=height,
+                width=width,
+                dtype=self.pipe.unet.dtype,
+                device=self.pipe.device,
+                generator=generator,
+            )
+        
+        noise_time = time.time() - noise_start
+        print(f"🎲 Shared latent preparation completed in {noise_time:.3f}s")
+
+        # Process sub-batches
+        all_final_latents = []
+        denoise_start = time.time()
+        
+        for sub_batch_idx in range(0, total_batch_size, sub_batch_size):
+            end_idx = min(sub_batch_idx + sub_batch_size, total_batch_size)
+            current_sub_batch_size = end_idx - sub_batch_idx
+            
+            print(f"🔄 Processing sub-batch {sub_batch_idx//sub_batch_size + 1}/{(total_batch_size + sub_batch_size - 1)//sub_batch_size}: images {sub_batch_idx}-{end_idx-1}")
+            
+            # Get embeddings for this sub-batch
+            sub_batch_embeddings = interpolated_embeddings[sub_batch_idx:end_idx]
+            batch_prompt_embeds = torch.cat(sub_batch_embeddings, dim=0)
+            
+            # Create negative embeddings for this sub-batch
+            negative_embedding = self._extract_text_embeddings("")
+            batch_negative_embeds = negative_embedding.repeat(current_sub_batch_size, 1, 1)
+            batch_combined_embeds = torch.cat([batch_negative_embeds, batch_prompt_embeds])
+            
+            # Create latents for this sub-batch (same initial latent repeated)
+            sub_batch_latents = single_latent.repeat(current_sub_batch_size, 1, 1, 1)
+            
+            # Run denoising for this sub-batch
+            timesteps = self.pipe.scheduler.timesteps
+            
+            for i, t in enumerate(timesteps):
+                latent_input = torch.cat([sub_batch_latents] * 2)
+                latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
+
+                with torch.no_grad():
+                    noise_pred = self.pipe.unet(
+                        latent_input, t, encoder_hidden_states=batch_combined_embeds
+                    ).sample
+
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                sub_batch_latents = self.pipe.scheduler.step(noise_pred, t, sub_batch_latents).prev_sample
+                
+                # Clean up intermediate tensors
+                del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
+
+            # Store the final latents for this sub-batch
+            all_final_latents.append(sub_batch_latents.cpu())  # Move to CPU to free GPU memory
+            
+            # Clean up sub-batch tensors
+            del sub_batch_latents, batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
+            torch.cuda.empty_cache()  # Free GPU memory between sub-batches
+        
+        # Combine all sub-batch results
+        final_latents_batch = torch.cat(all_final_latents, dim=0).to(self.pipe.device)
+        
+        denoise_time = time.time() - denoise_start
+        print(f"🧠 Sub-batched denoising ({num_inference_steps} steps × {total_batch_size} interpolations) completed in {denoise_time:.3f}s")
+
+        # Decode all images at once (or in sub-batches if needed)
+        decode_start = time.time()
+        
+        # For decoding, we can also sub-batch if needed
+        decode_sub_batch_size = min(sub_batch_size * 2, 8)  # VAE decode can handle slightly larger batches
+        all_decoded_images = []
+        
+        for decode_idx in range(0, total_batch_size, decode_sub_batch_size):
+            decode_end_idx = min(decode_idx + decode_sub_batch_size, total_batch_size)
+            
+            decode_latents = final_latents_batch[decode_idx:decode_end_idx]
+            
+            with torch.no_grad():
+                decode_latents.requires_grad_(False)
+                decoded_images = self.pipe.vae.decode(decode_latents / 0.18215).sample
+            
+            decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
+            all_decoded_images.append(decoded_images.cpu())
+            
+            del decode_latents, decoded_images
+            torch.cuda.empty_cache()
+        
+        # Combine all decoded images
+        final_images = torch.cat(all_decoded_images, dim=0)
+        
+        decode_time = time.time() - decode_start
+        print(f"🎨 Sub-batched VAE decoding completed in {decode_time:.3f}s")
+
+        # Handle output format processing
+        if output_format == "tensor":
+            images = final_images.to(self.pipe.device)  # Move back to GPU for output
+            print(f"🚀 Returning tensor format for ultra-fast serialization")
+        else:
+            # Convert to PIL Images
+            images = final_images.permute(0, 2, 3, 1).float().numpy()
+            pil_images = []
+            for i in range(images.shape[0]):
+                image_array = (images[i] * 255).astype('uint8')
+                pil_image = Image.fromarray(image_array)
+                pil_images.append(pil_image)
+            images = pil_images
+
+        total_time = time.time() - total_start
+        print(f"✅ Total sub-batched interpolated embedding generation time: {total_time:.3f}s")
+        print(f"📊 Sub-batching timing breakdown:")
+        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
+        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
+        print(f"   🎲 Noise prep: {noise_time:.3f}s ({noise_time/total_time*100:.1f}%)")
+        print(f"   🧠 Denoising: {denoise_time:.3f}s ({denoise_time/total_time*100:.1f}%)")
+        print(f"   🎨 Decoding: {decode_time:.3f}s ({decode_time/total_time*100:.1f}%)")
+
+        # Return same format as original method
+        if output_format == "tensor":
+            return {
+                'images': images,
+                'format': 'torch_tensor',
+                'shape': tuple(images.shape),
+                'device': str(images.device),
+                'dtype': str(images.dtype),
+                'latents': final_latents_batch,
+                'embeddings': torch.cat(interpolated_embeddings, dim=0)  # All interpolated embeddings
+            }
+        elif output_format == "pil":
+            return {
+                'images': images,
+                'format': 'pil',
+                'latents': final_latents_batch,
+                'embeddings': torch.cat(interpolated_embeddings, dim=0)
+            }
+        else:
+            return {
+                'images': images,
+                'format': 'pil', 
+                'latents': final_latents_batch,
+                'embeddings': torch.cat(interpolated_embeddings, dim=0)
             }
     
     def interpolate_embeddings(self, embedding1: Any, embedding2: Any, alpha: float) -> Any:
