@@ -424,14 +424,18 @@ class DreamspaceNavigator:
                 try:
                     # Generate interpolated embeddings for this segment
                     request_id = f"multi_prompt_seg_{i:03d}"
+                    
+                    # Create parameters dict with segment-specific overrides
+                    segment_params = self.generation_params.copy()
+                    segment_params["latent_cookie"] = latent_cookie
+                    segment_params["seed"] = shared_seed
+                    
                     frames = self.img_gen.generate_interpolated_embeddings(
                         prompt1=prompt1,
                         prompt2=prompt2,
                         batch_size=self.batch_size,
                         request_id=request_id,
-                        latent_cookie=latent_cookie,
-                        seed=shared_seed,
-                        **self.generation_params
+                        **segment_params
                     )
                     
                     if frames:
