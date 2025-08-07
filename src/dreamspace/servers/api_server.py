@@ -581,7 +581,7 @@ def create_app(backend_type: str = "sd15_server",
             # Prepare generation parameters
             gen_params = {
                 k: v for k, v in request.dict().items() 
-                if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude', 'bifurcation_step', 'output_format']
+                if v is not None and k not in ['prompt', 'batch_size', 'noise_magnitude', 'bifurcation_step', 'output_format', 'latent_cookie']
             }
 
             # Delegate batch generation with latent wiggle to the backend
