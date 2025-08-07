@@ -56,13 +56,15 @@ Controls:
   M: Show model info
 """
 
-import pygame
+import random
 import time
 import threading
 import random
 import os
 import shutil
 from typing import List, Optional, Tuple
+
+import pygame
 from PIL import Image
 from screeninfo import get_monitors
 from tqdm import tqdm
@@ -407,7 +409,6 @@ class DreamspaceNavigator:
             latent_cookie = self.latent_cookie
             print(f"🍪 Using user-specified latent cookie {latent_cookie} for consistent composition across sequence")
         else:
-            import random
             latent_cookie = random.randint(1, 1000000)
             print(f"🍪 Generated latent cookie {latent_cookie} for consistent composition across sequence")
         
@@ -476,12 +477,11 @@ class DreamspaceNavigator:
                 print(f"💾 All frames saved to: {self.output_dir}")
                 print(f"🎬 Ready for video creation: frame_000000.{self.output_format} to frame_{self.total_frames_saved-1:06d}.{self.output_format}")
             
-            # Set the last batch as current frames for immediate display
-            last_batch_start = len(all_frames) - self.batch_size
-            if last_batch_start >= 0:
-                self.img_gen.current_frames = all_frames[last_batch_start:]
-                self.img_gen.is_interpolated_sequence = True
-                self.img_gen._create_randomized_order()
+            # Set ALL frames as current frames for animation (not just the last batch)
+            print(f"🎬 Setting up animation with all {len(all_frames)} frames from multi-prompt sequence")
+            self.img_gen.current_frames = all_frames
+            self.img_gen.is_interpolated_sequence = True
+            self.img_gen._create_randomized_order()
             
             return True
         else:
