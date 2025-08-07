@@ -316,7 +316,6 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         vae_start = time.time()
         # Ensure latents are on the same device as the VAE
-        latents_batch = latents_batch.to(self.pipe.device)
         images = self.pipe.vae.decode(latents_batch / 0.18215).sample
         vae_time = time.time() - vae_start
         print(f"🔮 VAE decode completed in {vae_time:.3f}s")
