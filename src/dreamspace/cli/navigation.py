@@ -52,6 +52,13 @@ Examples:
         help="Server URL (default: http://172.28.5.21:8001)"
     )
     
+    # Model selection
+    parser.add_argument(
+        "--model", type=str, default="sd15_server",
+        choices=["sd15_server", "sd21_server", "kandinsky21_server"],
+        help="Model to use for generation (default: sd15_server)"
+    )
+    
     # Generation parameters
     parser.add_argument(
         "--batch-size", type=int, default=2,

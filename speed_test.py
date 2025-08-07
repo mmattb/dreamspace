@@ -132,7 +132,7 @@ Examples:
 class SpeedTester:
     """Minimalist speed testing utility for dreamspace generation."""
     
-    def __init__(self, server_url: str, prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "png", interpolation_mode: bool = False, prompt2: str = None):
+    def __init__(self, server_url: str, prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "png", interpolation_mode: bool = False, prompt2: str = None, model: str = "sd15_server"):
         self.server_url = server_url
         self.image_width, self.image_height = image_size
         self.batch_size = batch_size
@@ -143,6 +143,7 @@ class SpeedTester:
         self.interpolation_mode = interpolation_mode
         self.prompt2 = prompt2
         self.output_format = output_format
+        self.model = model
         
         # Generation parameters
         self.generation_params = {
@@ -156,13 +157,16 @@ class SpeedTester:
         print(f"🔮 Connecting to server: {server_url}")
         print(f"📏 Image size: {self.image_width}x{self.image_height}")
         print(f"📦 Batch size: {batch_size}")
-        print(f"� Noise magnitude: {self.noise_magnitude}")
-        print(f"�💭 Prompt: '{prompt}'")
+        print(f"🎯 Model: {model}")
+        print(f"🔧 Noise magnitude: {self.noise_magnitude}")
+        print(f"🔀 Bifurcation step: {self.bifurcation_step}")
+        print(f"📄 Output format: {self.output_format}")
+        print(f"💭 Prompt: '{prompt}'")
         print()
         
         # Initialize image generator
         try:
-            self.img_gen = AnimatedRemoteImgGen(server_url, prompt)
+            self.img_gen = AnimatedRemoteImgGen(server_url, prompt, model)
             print("✅ Connection established!")
         except Exception as e:
             print(f"❌ Failed to connect: {e}")
@@ -339,7 +343,8 @@ def main():
         bifurcation_step=bifurcation_step,
         output_format=args.output_format,
         interpolation_mode=interpolation_mode,
-        prompt2=prompt2
+        prompt2=prompt2,
+        model=getattr(args, 'model', 'sd15_server')
     )
     
     # Print test configuration

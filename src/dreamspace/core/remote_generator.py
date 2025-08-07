@@ -24,9 +24,10 @@ from .animation import (
 class AnimatedRemoteImgGen:
     """Remote image generator with batch animation support and artistic modulation."""
     
-    def __init__(self, server_url: str, initial_prompt: str = "a surreal dreamlike forest"):
+    def __init__(self, server_url: str, initial_prompt: str = "a surreal dreamlike forest", model: str = "sd15_server"):
         self.server_url = server_url.rstrip('/')
         self.prompt = initial_prompt
+        self.model = model  # Model to use: sd15_server, sd21_server, or kandinsky21_server
         self.current_frames: List[Image.Image] = []
         self.frame_order: List[int] = []  # Randomized indices for frame display
         self.frame_index = 0
@@ -56,10 +57,58 @@ class AnimatedRemoteImgGen:
                 print(f"✅ Connected to server: {self.server_url}")
                 print(f"   Model loaded: {health.get('model_loaded', False)}")
                 print(f"   GPU available: {health.get('gpu_available', False)}")
+                available_models = health.get('available_models', [])
+                if available_models:
+                    print(f"   Available models: {', '.join(available_models)}")
             else:
                 raise Exception(f"Server health check failed: {response.status_code}")
         except Exception as e:
             raise Exception(f"Failed to connect to server: {e}")
+    
+    def switch_model(self, model: str) -> bool:
+        """Switch the model used for generation.
+        
+        Args:
+            model: Model to switch to ('sd15_server', 'sd21_server', or 'kandinsky21_server')
+            
+        Returns:
+            True if switch was successful, False otherwise
+        """
+        try:
+            response = requests.post(
+                f"{self.server_url}/switch_model",
+                json={"model": model},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success", False):
+                    self.model = model
+                    print(f"✅ Switched to model: {model}")
+                    return True
+                else:
+                    print(f"❌ Failed to switch model: {result.get('message', 'Unknown error')}")
+                    return False
+            else:
+                print(f"❌ Model switch request failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error switching model: {e}")
+            return False
+    
+    def get_available_models(self) -> List[str]:
+        """Get list of available models from the server."""
+        try:
+            response = requests.get(f"{self.server_url}/health", timeout=5)
+            if response.status_code == 200:
+                health = response.json()
+                return health.get('available_models', [])
+            else:
+                return []
+        except Exception:
+            return []
     
     def _create_randomized_order(self):
         """Create a randomized order for frame display."""
@@ -97,6 +146,7 @@ class AnimatedRemoteImgGen:
         request_data = {
             "prompt": use_prompt,
             "batch_size": batch_size,
+            "model": self.model,
             "width": kwargs.get("width", 512),
             "height": kwargs.get("height", 512),
             "num_inference_steps": kwargs.get("num_inference_steps", 20),
@@ -240,6 +290,7 @@ class AnimatedRemoteImgGen:
             "prompt1": prompt1,
             "prompt2": prompt2,
             "batch_size": batch_size,
+            "model": self.model,
             "width": kwargs.get("width", 512),
             "height": kwargs.get("height", 512),
             "num_inference_steps": kwargs.get("num_inference_steps", 20),
