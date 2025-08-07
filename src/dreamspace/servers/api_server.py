@@ -31,6 +31,7 @@ except ImportError:
 # Request/Response models
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., description="Text prompt for image generation")
+    model: Optional[str] = Field("sd15_server", description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'")
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
     num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
     width: Optional[int] = Field(768, description="Image width")
@@ -41,6 +42,7 @@ class GenerateRequest(BaseModel):
 
 class GenerateBatchRequest(BaseModel):
     prompt: str = Field(..., description="Text prompt for image generation")
+    model: Optional[str] = Field("sd15_server", description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'")
     batch_size: int = Field(..., description="Number of variations to generate (1-32)")
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
     num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
@@ -56,6 +58,7 @@ class GenerateBatchRequest(BaseModel):
 class GenerateInterpolatedEmbeddingsRequest(BaseModel):
     prompt1: str = Field(..., description="Starting text prompt for interpolation")
     prompt2: str = Field(..., description="Ending text prompt for interpolation")
+    model: Optional[str] = Field("sd15_server", description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'")
     batch_size: int = Field(..., description="Number of interpolation steps (including start and end)")
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
     num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
@@ -90,6 +93,7 @@ class HealthResponse(BaseModel):
     current_device: Optional[int] = None
     selected_gpus: Optional[List[int]] = None
     selection: Optional[str] = None
+    available_models: Optional[List[str]] = None
 
 
 class ModelInfo(BaseModel):
@@ -99,8 +103,73 @@ class ModelInfo(BaseModel):
     memory_usage: Optional[str] = None
 
 
+class SwitchModelRequest(BaseModel):
+    model: str = Field(..., description="Model to switch to: 'sd15_server', 'sd21_server', or 'kandinsky21_server'")
+
+
+class SwitchModelResponse(BaseModel):
+    success: bool
+    message: str
+    current_model: str
+
+
 # Global state
 app_state = {}
+
+
+def get_available_models():
+    """Get list of available models."""
+    return ["sd15_server", "sd21_server", "kandinsky21_server"]
+
+
+def get_model_backend(model: str = None):
+    """Get the backend for the specified model, creating it if necessary."""
+    if model is None:
+        model = app_state.get("current_model", "sd15_server")
+    
+    # Validate model
+    if model not in get_available_models():
+        raise ValueError(f"Unknown model: {model}. Available models: {get_available_models()}")
+    
+    # Check if model is already loaded
+    model_cache = app_state.get("model_cache", {})
+    if model in model_cache:
+        print(f"🔄 Using cached model: {model}")
+        return model_cache[model]
+    
+    # Create new model backend
+    try:
+        config = app_state.get("config") or Config()
+        gpu_selection = app_state.get("gpu_selection", "auto")
+        disable_safety_checker = app_state.get("disable_safety_checker", False)
+        
+        # Prepare backend kwargs
+        backend_kwargs = {}
+        
+        # Add safety checker configuration for SD models
+        if model in ["sd15_server", "sd21_server"] and disable_safety_checker:
+            backend_kwargs["disable_safety_checker"] = True
+        
+        # Add GPU configuration if specified
+        if gpu_selection != "auto":
+            first_gpu = gpu_selection.split(',')[0]
+            backend_kwargs["device"] = f"cuda:{first_gpu}"
+        
+        print(f"🔮 Loading model: {model}")
+        img_gen = ImgGen(backend=model, config=config, **backend_kwargs)
+        
+        # Cache the model
+        if "model_cache" not in app_state:
+            app_state["model_cache"] = {}
+        app_state["model_cache"][model] = img_gen
+        app_state["current_model"] = model
+        
+        print(f"✅ Model loaded successfully: {model}")
+        return img_gen
+        
+    except Exception as e:
+        print(f"❌ Failed to load model {model}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load model {model}: {str(e)}")
 
 
 @asynccontextmanager
@@ -108,84 +177,48 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     # Startup
     config = Config()
-    backend_type = app_state.get("backend_type", "kandinsky_local")
+    backend_type = app_state.get("backend_type", "sd15_server")  # Default to SD 1.5
     gpu_selection = app_state.get("gpu_selection", "auto")
     disable_safety_checker = app_state.get("disable_safety_checker", False)
     
     try:
-        # Prepare backend kwargs with GPU configuration
-        backend_kwargs = {}
-        
-        # Add safety checker configuration for SD 1.5
-        if backend_type == "sd15_server" and disable_safety_checker:
-            backend_kwargs["disable_safety_checker"] = True
-        
-        # Add GPU configuration if specified
-        if gpu_selection != "auto":
-            # For single GPU, set device parameter
-            first_gpu = gpu_selection.split(',')[0]
-            backend_kwargs["device"] = f"cuda:{first_gpu}"
-            
-            if "," in gpu_selection:
-                # Multi-GPU configuration - create multiple backend instances
-                gpu_list = [gpu.strip() for gpu in gpu_selection.split(",")]
-                print(f"🎮 Multi-GPU setup: Creating backends on GPUs {gpu_list}")
-                
-                # Create primary backend on first GPU
-                app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
-                
-                # Create additional backends for other GPUs
-                multi_backends = {"0": app_state["img_gen"]}  # GPU 0 (first GPU)
-                
-                for i, gpu_id in enumerate(gpu_list[1:], 1):  # Start from second GPU
-                    try:
-                        gpu_backend_kwargs = {**backend_kwargs}
-                        gpu_backend_kwargs["device"] = f"cuda:{gpu_id}"
-                        gpu_backend = ImgGen(backend=backend_type, config=config, **gpu_backend_kwargs)
-                        multi_backends[gpu_id] = gpu_backend
-                        print(f"  ✅ Backend {i+1} loaded on GPU {gpu_id}")
-                    except Exception as e:
-                        print(f"  ❌ Failed to load backend on GPU {gpu_id}: {e}")
-                
-                app_state["multi_backends"] = multi_backends
-                app_state["gpu_list"] = gpu_list
-                print(f"🎯 Multi-GPU setup complete: {len(multi_backends)} backends ready")
-            else:
-                print(f"🎮 Single GPU setup: GPU {gpu_selection}")
-                app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
-        else:
-            app_state["img_gen"] = ImgGen(backend=backend_type, config=config, **backend_kwargs)
+        # Initialize with default model
         app_state["config"] = config
-        print(f"✅ Model loaded successfully: {backend_type}")
+        app_state["current_model"] = backend_type
+        
+        # Load default model
+        get_model_backend(backend_type)
+        
+        print(f"✅ API server initialized with default model: {backend_type}")
     except Exception as e:
-        print(f"❌ Failed to load model: {e}")
+        print(f"❌ Failed to initialize API server: {e}")
         app_state["img_gen"] = None
     
     yield
     
-    # Shutdown
-    if "img_gen" in app_state and app_state["img_gen"]:
-        if hasattr(app_state["img_gen"].backend, 'cleanup'):
-            app_state["img_gen"].backend.cleanup()
-        print("🧹 Cleaned up primary backend")
+    # Shutdown - Clean up all cached models
+    model_cache = app_state.get("model_cache", {})
+    for model_name, img_gen in model_cache.items():
+        if img_gen and hasattr(img_gen.backend, 'cleanup'):
+            img_gen.backend.cleanup()
+            print(f"🧹 Cleaned up model: {model_name}")
     
-    # Clean up additional GPU backends
+    # Clean up additional GPU backends (if any)
     if "multi_backends" in app_state:
         multi_backends = app_state["multi_backends"]
         for gpu_id, backend in multi_backends.items():
-            if backend and backend != app_state.get("img_gen"):  # Don't double-cleanup primary
-                if hasattr(backend.backend, 'cleanup'):
-                    backend.backend.cleanup()
+            if backend and hasattr(backend.backend, 'cleanup'):
+                backend.backend.cleanup()
         print(f"🧹 Cleaned up {len(multi_backends)} GPU backends")
 
 
-def create_app(backend_type: str = "kandinsky_local", 
+def create_app(backend_type: str = "sd15_server", 
                enable_auth: bool = False,
                api_key: Optional[str] = None) -> FastAPI:
     """Create FastAPI application.
     
     Args:
-        backend_type: Type of backend to use
+        backend_type: Default backend type to use ("sd15_server", "sd21_server", etc.)
         enable_auth: Whether to enable API key authentication
         api_key: API key for authentication (if enabled)
         
@@ -228,18 +261,19 @@ def create_app(backend_type: str = "kandinsky_local",
     # Choose the right dependency based on auth setting
     auth_dependency = verify_token_with_auth if enable_auth else verify_token_no_auth
     
-    def get_img_gen():
-        """Get ImgGen instance."""
-        img_gen = app_state.get("img_gen")
-        if not img_gen:
-            raise HTTPException(status_code=503, detail="Model not loaded")
-        return img_gen
+    def get_img_gen(model: str = None):
+        """Get ImgGen instance for the specified model."""
+        try:
+            return get_model_backend(model)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Model not available: {str(e)}")
     
     @app.get("/health", response_model=HealthResponse)
     async def health():
         """Health check endpoint."""
         try:
-            img_gen = get_img_gen()
+            current_model = app_state.get("current_model", "sd15_server")
+            img_gen = get_img_gen(current_model)
             model_loaded = img_gen is not None
             
             # Check GPU availability
@@ -270,7 +304,8 @@ def create_app(backend_type: str = "kandinsky_local",
             response_data = {
                 "status": "healthy",
                 "model_loaded": model_loaded,
-                "gpu_available": gpu_available
+                "gpu_available": gpu_available,
+                "available_models": ["sd15_server", "sd21_server", "kandinsky21_server"]
             }
             response_data.update(gpu_info)
             
@@ -294,6 +329,36 @@ def create_app(backend_type: str = "kandinsky_local",
             backend_type=type(backend).__name__,
             device=getattr(backend, 'device', 'unknown')
         )]
+
+    @app.post("/switch_model", response_model=SwitchModelResponse)
+    async def switch_model(
+        request: SwitchModelRequest,
+        authenticated: bool = Depends(auth_dependency)
+    ):
+        """Switch the active model backend."""
+        try:
+            # Validate model choice
+            if request.model not in ["sd15_server", "sd21_server", "kandinsky21_server"]:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid model '{request.model}'. Available models: sd15_server, sd21_server, kandinsky21_server"
+                )
+            
+            # Load the new model (will be cached)
+            img_gen = get_model_backend(request.model)
+            
+            return SwitchModelResponse(
+                success=True,
+                message=f"Successfully switched to {request.model}",
+                current_model=request.model
+            )
+            
+        except Exception as e:
+            return SwitchModelResponse(
+                success=False,
+                message=f"Failed to switch to {request.model}: {str(e)}",
+                current_model=app_state.get("current_model", "unknown")
+            )
     
     @app.post("/generate", response_model=ImageResponse)
     async def generate_image(
@@ -302,7 +367,7 @@ def create_app(backend_type: str = "kandinsky_local",
     ):
         """Generate an image from text prompt."""
         try:
-            img_gen = get_img_gen()
+            img_gen = get_model_backend(request.model)
             
             # Prepare generation parameters
             gen_params = {
@@ -353,7 +418,7 @@ def create_app(backend_type: str = "kandinsky_local",
         """Generate a batch of image variations for animation with smart chunking for multi-GPU."""
 
         try:
-            img_gen = get_img_gen()
+            img_gen = get_model_backend(request.model)
 
             # Limit batch size for server stability
             batch_size = min(request.batch_size, 32)
@@ -571,7 +636,7 @@ def create_app(backend_type: str = "kandinsky_local",
     async def generate_interpolated_embeddings(request: GenerateInterpolatedEmbeddingsRequest):
         """Generate a batch of images using interpolated embeddings between two prompts."""
         try:
-            img_gen = get_img_gen()
+            img_gen = get_model_backend(request.model)
             backend = img_gen.backend
             result = backend.generate_interpolated_embeddings(
                 prompt1=request.prompt1,

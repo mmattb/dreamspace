@@ -50,6 +50,10 @@ Controls:
   1-6: Switch rhythm patterns
   S: Save current frame
   X: Shuffle frame order
+  Q: Switch to SD 1.5
+  W: Switch to SD 2.1
+  E: Switch to Kandinsky 2.1
+  M: Show model info
 """
 
 import pygame
@@ -82,7 +86,7 @@ class DreamspaceNavigator:
     
     def __init__(self, server_url: str, initial_prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, 
                  noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg",
-                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None, output_dir: str = None, prompt_list: List[str] = None, latent_cookie: int = None, seed: int = None):
+                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None, output_dir: str = None, prompt_list: List[str] = None, latent_cookie: int = None, seed: int = None, model: str = "sd15_server"):
         self.server_url = server_url
         self.original_image_width, self.original_image_height = image_size
         self.batch_size = batch_size
@@ -93,6 +97,7 @@ class DreamspaceNavigator:
         self.maximize_window = maximize_window
         self.interpolation_mode = interpolation_mode
         self.prompt2 = prompt2
+        self.model = model
         self.output_dir = output_dir
         self.prompt_list = prompt_list
         self.latent_cookie = latent_cookie
@@ -152,7 +157,7 @@ class DreamspaceNavigator:
         # Initialize image generator
         print("🔮 Connecting to remote server...")
         try:
-            self.img_gen = AnimatedRemoteImgGen(server_url, initial_prompt)
+            self.img_gen = AnimatedRemoteImgGen(server_url, initial_prompt, model)
         except Exception as e:
             print(f"❌ Failed to connect: {e}")
             pygame.quit()
@@ -688,6 +693,29 @@ class DreamspaceNavigator:
             
         elif key == pygame.K_6:
             self.img_gen.animation_controller.set_rhythm_modulator(ContinuousLinearRhythm(speed=2.5))
+            
+        elif key == pygame.K_q:
+            # Switch to SD 1.5
+            if self.img_gen.switch_model("sd15_server"):
+                print("🔮 Switched to Stable Diffusion 1.5")
+            
+        elif key == pygame.K_w:
+            # Switch to SD 2.1
+            if self.img_gen.switch_model("sd21_server"):
+                print("🔮 Switched to Stable Diffusion 2.1")
+                
+        elif key == pygame.K_e:
+            # Switch to Kandinsky 2.1
+            if self.img_gen.switch_model("kandinsky21_server"):
+                print("🔮 Switched to Kandinsky 2.1")
+                
+        elif key == pygame.K_m:
+            # Show available models
+            models = self.img_gen.get_available_models()
+            current_model = self.img_gen.model
+            print(f"🎯 Current model: {current_model}")
+            print(f"📋 Available models: {', '.join(models)}")
+            print("📝 Switch keys: Q (SD 1.5), W (SD 2.1), E (Kandinsky 2.1)")
     
     def get_status(self):
         """Get current status information from the animation system."""
@@ -760,7 +788,8 @@ class DreamspaceNavigator:
                 f"Effects: {', '.join(self.current_effects) if self.current_effects else 'None'}",
                 f"Animation: {'ON' if self.animation_enabled else 'OFF'} ({self.animation_speed} FPS)",
                 f"Rhythm: {rhythm_name} | Interpolation: {interpolation_status}",
-                f"Format: {self.output_format} | Noise: {self.noise_magnitude} | Bifurcation: {self.bifurcation_step}"
+                f"Format: {self.output_format} | Noise: {self.noise_magnitude} | Bifurcation: {self.bifurcation_step}",
+                f"Model: {self.img_gen.model}"
             ]
             
             if status['cross_batch_active']:
@@ -815,7 +844,8 @@ def main():
         bifurcation_step=3,
         output_format="png",  # Use PNG default for better quality
         maximize_window=maximize_window,
-        output_dir=output_dir
+        output_dir=output_dir,
+        model="sd15_server"  # Default model for interactive mode
     )
     
     navigator.run()
@@ -870,7 +900,8 @@ def main_with_args():
         output_dir=output_dir,
         prompt_list=prompt_list,
         latent_cookie=getattr(args, 'latent_cookie', None),
-        seed=getattr(args, 'seed', None)
+        seed=getattr(args, 'seed', None),
+        model=getattr(args, 'model', 'sd15_server')
     )
     
     # Set initial configuration
