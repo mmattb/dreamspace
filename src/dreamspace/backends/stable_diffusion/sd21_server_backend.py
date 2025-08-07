@@ -54,20 +54,20 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         megapixels = (width * height) / 1_000_000
         
         # Rough heuristic: Base memory budget in GB (conservative estimate)
-        # SD 2.1 uses roughly 4-6GB base, leave some room for operations
-        available_memory_gb = 8.0  # Conservative estimate for typical GPU
+        # SD 2.1 uses roughly 6-10GB base (much larger than SD 1.5), leave room for operations
+        available_memory_gb = 6.0  # More conservative for SD 2.1's larger model
         
         # Estimate memory usage per image during generation
         # SD 2.1 latents are 1/8 resolution, 4 channels, float16
         latent_megapixels = megapixels / 64  # 8x8 downsampling
         
-        # Memory estimates (rough):
+        # Memory estimates for SD 2.1 (higher than SD 1.5):
         # - Latents: latent_megapixels * 4 channels * 2 bytes (float16) 
-        # - UNet activations: ~3x latent size during forward pass
+        # - UNet activations: ~5x latent size (larger UNet, more attention heads)
         # - VAE decode: ~6x latent size (RGB output)
-        # - Overhead: 2x for gradient computation, attention maps, etc.
+        # - Overhead: 3x for gradient computation, larger attention maps, OpenCLIP overhead
         
-        memory_per_image_mb = latent_megapixels * 4 * 2 * (3 + 6 + 2)  # Conservative estimate
+        memory_per_image_mb = latent_megapixels * 4 * 2 * (5 + 6 + 3)  # More conservative for SD 2.1
         memory_per_image_gb = memory_per_image_mb / 1000
         
         # Calculate how many images we can fit in memory
@@ -76,11 +76,11 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         # Don't exceed the total batch size
         sub_batch_size = min(max_parallel_images, total_batch_size)
         
-        # Apply some practical limits
-        sub_batch_size = max(1, min(sub_batch_size, 16))  # Never more than 16 per sub-batch
+        # Apply more conservative practical limits for SD 2.1
+        sub_batch_size = max(1, min(sub_batch_size, 8))  # Never more than 8 per sub-batch for SD 2.1
         
-        print(f"📊 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):")
-        print(f"   Estimated {memory_per_image_gb:.2f}GB per image")
+        print(f"📊 SD 2.1 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):")
+        print(f"   Estimated {memory_per_image_gb:.2f}GB per image (SD 2.1 is memory-intensive)")
         print(f"   Sub-batch size: {sub_batch_size} (from total {total_batch_size})")
         
         return sub_batch_size
@@ -119,12 +119,26 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         else:
             print(f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)")
         
-        # Enable memory optimizations
+        # Enable memory optimizations - SD 2.1 benefits from aggressive memory management
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
             print("✅ XFormers memory optimization enabled")
         except Exception:
             print("⚠️ XFormers not available, using default attention")
+        
+        # Enable additional memory optimizations for SD 2.1's larger model
+        try:
+            self.pipe.enable_attention_slicing(1)  # Slice attention computation for memory efficiency
+            print("✅ Attention slicing enabled for SD 2.1")
+        except Exception:
+            print("⚠️ Attention slicing not available")
+        
+        try:
+            if hasattr(self.pipe.vae, 'enable_slicing'):
+                self.pipe.vae.enable_slicing()
+                print("✅ VAE slicing enabled for SD 2.1")
+        except Exception:
+            print("⚠️ VAE slicing not available")
         
         print(f"✅ Stable Diffusion 2.1 loaded successfully on {self.device}!")
     
@@ -774,8 +788,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         # Decode all images at once (or in sub-batches if needed)
         decode_start = time.time()
         
-        # For decoding, we can also sub-batch if needed
-        decode_sub_batch_size = min(sub_batch_size * 2, 8)  # VAE decode can handle slightly larger batches
+        # For decoding, we can also sub-batch if needed - SD 2.1 VAE is more memory intensive
+        decode_sub_batch_size = min(sub_batch_size * 1, 4)  # SD 2.1 VAE decode needs smaller batches
         all_decoded_images = []
         
         for decode_idx in range(0, total_batch_size, decode_sub_batch_size):
