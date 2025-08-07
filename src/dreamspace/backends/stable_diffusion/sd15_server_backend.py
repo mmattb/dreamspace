@@ -33,6 +33,10 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         self.device = device or "cuda"
         self.model_id = "runwayml/stable-diffusion-v1-5"
         self.disable_safety_checker = disable_safety_checker
+        
+        # Latent cache for shared initial latents across batches
+        self.latent_cache = {}  # cookie -> latent tensor
+        
         self._load_pipelines()
     
     def _load_pipelines(self):
@@ -79,7 +83,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         print(f"✅ Stable Diffusion 1.5 loaded successfully on {self.device}!")
     
     @no_grad_method
-    def generate(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, output_format: str = "pil", **kwargs) -> Dict[str, Any]:
+    def generate(self, prompt: str, batch_size: int, noise_magnitude: float, bifurcation_step: int, output_format: str = "pil", latent_cookie: Optional[int] = None, **kwargs) -> Dict[str, Any]:
         """Generate a batch of images with bifurcated latent wiggle variations.
         
         This approach runs shared denoising until bifurcation_step, then adds noise
@@ -141,18 +145,39 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         encode_time = time.time() - encode_start
         print(f"📝 Prompt encoding completed in {encode_time:.3f}s")
 
-        # Step 3: Prepare initial noise
+        # Step 3: Prepare initial noise (with optional latent caching)
         noise_start = time.time()
         
-        latents = self.pipe.prepare_latents(
-            batch_size=1,
-            num_channels_latents=self.pipe.unet.config.in_channels,
-            height=height,
-            width=width,
-            dtype=self.pipe.unet.dtype,
-            device=self.pipe.device,
-            generator=generator,
-        )
+        # Check if we should use cached latent
+        if latent_cookie is not None:
+            latent_key = (latent_cookie, height, width)  # Include dimensions in key
+            if latent_key in self.latent_cache:
+                print(f"🍪 Using cached latent for cookie {latent_cookie}")
+                latents = self.latent_cache[latent_key].clone()
+            else:
+                print(f"🍪 Creating new latent for cookie {latent_cookie}")
+                latents = self.pipe.prepare_latents(
+                    batch_size=1,
+                    num_channels_latents=self.pipe.unet.config.in_channels,
+                    height=height,
+                    width=width,
+                    dtype=self.pipe.unet.dtype,
+                    device=self.pipe.device,
+                    generator=generator,
+                )
+                # Cache the latent for future use
+                self.latent_cache[latent_key] = latents.clone()
+        else:
+            # No caching - generate fresh latent each time
+            latents = self.pipe.prepare_latents(
+                batch_size=1,
+                num_channels_latents=self.pipe.unet.config.in_channels,
+                height=height,
+                width=width,
+                dtype=self.pipe.unet.dtype,
+                device=self.pipe.device,
+                generator=generator,
+            )
         
         noise_time = time.time() - noise_start
         print(f"🎲 Initial noise preparation completed in {noise_time:.3f}s")
@@ -324,7 +349,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             }
     
     @no_grad_method
-    def generate_interpolated_embeddings(self, prompt1: str, prompt2: str, batch_size: int, output_format: str = "pil", **kwargs) -> Dict[str, Any]:
+    def generate_interpolated_embeddings(self, prompt1: str, prompt2: str, batch_size: int, output_format: str = "pil", latent_cookie: Optional[int] = None, **kwargs) -> Dict[str, Any]:
         """Generate a batch of images using interpolated embeddings between two prompts.
 
         Args:
@@ -401,19 +426,39 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         encode_time = time.time() - encode_start
         print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
 
-        # Prepare initial noise for the batch - use same latent for all interpolation steps
+        # Prepare initial noise for the batch - use same latent for all interpolation steps (with optional caching)
         noise_start = time.time()
         
-        # Generate a single latent and repeat it for all interpolation steps
-        single_latent = self.pipe.prepare_latents(
-            batch_size=1,
-            num_channels_latents=self.pipe.unet.config.in_channels,
-            height=height,
-            width=width,
-            dtype=self.pipe.unet.dtype,
-            device=self.pipe.device,
-            generator=generator,
-        )
+        # Check if we should use cached latent
+        if latent_cookie is not None:
+            latent_key = (latent_cookie, height, width)  # Include dimensions in key
+            if latent_key in self.latent_cache:
+                print(f"🍪 Using cached latent for cookie {latent_cookie}")
+                single_latent = self.latent_cache[latent_key].clone()
+            else:
+                print(f"🍪 Creating new latent for cookie {latent_cookie}")
+                single_latent = self.pipe.prepare_latents(
+                    batch_size=1,
+                    num_channels_latents=self.pipe.unet.config.in_channels,
+                    height=height,
+                    width=width,
+                    dtype=self.pipe.unet.dtype,
+                    device=self.pipe.device,
+                    generator=generator,
+                )
+                # Cache the latent for future use
+                self.latent_cache[latent_key] = single_latent.clone()
+        else:
+            # No caching - generate fresh latent each time
+            single_latent = self.pipe.prepare_latents(
+                batch_size=1,
+                num_channels_latents=self.pipe.unet.config.in_channels,
+                height=height,
+                width=width,
+                dtype=self.pipe.unet.dtype,
+                device=self.pipe.device,
+                generator=generator,
+            )
         
         # Repeat the same latent for all interpolation steps
         latents_batch = single_latent.repeat(batch_size, 1, 1, 1)

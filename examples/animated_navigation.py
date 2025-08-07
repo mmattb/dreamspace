@@ -32,6 +32,9 @@ Usage:
     
     # Save all images to a directory (clears directory on each new batch)
     PYTHONPATH=src python examples/animated_navigation.py --output-dir ./generated_images
+    
+    # Multi-prompt interpolation sequence with looping
+    PYTHONPATH=src python examples/animated_navigation.py --prompt-list "forest scene" "desert landscape" "ocean view" "mountain vista" --batch-size 8 --output-dir ./sequence
 
 Controls:
   Arrow Keys: Navigate parameter space
@@ -55,6 +58,36 @@ from typing import List, Optional, Tuple
 from PIL import Image
 from screeninfo import get_monitors
 
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    # Fallback tqdm that just prints updates
+    class tqdm:
+        def __init__(self, total=None, desc="", unit=""):
+            self.total = total
+            self.desc = desc
+            self.current = 0
+            print(f"{desc}: 0/{total}")
+        
+        def update(self, n=1):
+            self.current += n
+            print(f"{self.desc}: {self.current}/{self.total}")
+        
+        def set_description(self, desc):
+            self.desc = desc
+        
+        def set_postfix(self, postfix_dict):
+            postfix_str = " | ".join([f"{k}: {v}" for k, v in postfix_dict.items()])
+            print(f"  {postfix_str}")
+        
+        def __enter__(self):
+            return self
+        
+        def __exit__(self, *args):
+            pass
+
 # Import from the main dreamspace library
 from dreamspace.core.animation import HeartbeatRhythm, BreathingRhythm, WaveRhythm, LinearRhythm, ContinuousLinearRhythm
 from dreamspace.core.remote_generator import AnimatedRemoteImgGen
@@ -74,7 +107,7 @@ class DreamspaceNavigator:
     
     def __init__(self, server_url: str, initial_prompt: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2, 
                  noise_magnitude: float = 0.17, bifurcation_step: int = 3, output_format: str = "jpeg",
-                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None, output_dir: str = None):
+                 maximize_window: bool = False, interpolation_mode: bool = False, prompt2: str = None, output_dir: str = None, prompt_list: List[str] = None, latent_cookie: int = None):
         self.server_url = server_url
         self.original_image_width, self.original_image_height = image_size
         self.batch_size = batch_size
@@ -86,6 +119,13 @@ class DreamspaceNavigator:
         self.interpolation_mode = interpolation_mode
         self.prompt2 = prompt2
         self.output_dir = output_dir
+        self.prompt_list = prompt_list
+        self.latent_cookie = latent_cookie
+        
+        # Multi-prompt sequence state
+        self.is_multi_prompt_mode = prompt_list is not None and len(prompt_list) > 1
+        self.current_prompt_pair_index = 0
+        self.total_frames_saved = 0  # Track consecutive frame numbering
         
         # Initialize pygame
         pygame.init()
@@ -155,6 +195,11 @@ class DreamspaceNavigator:
             "output_format": self.output_format
         }
         
+        # Add latent cookie if specified
+        if self.latent_cookie is not None:
+            self.generation_params["latent_cookie"] = self.latent_cookie
+            print(f"🍪 Using latent cookie {self.latent_cookie} for consistent composition")
+        
         # Prompt state
         self.current_prompt = initial_prompt
         self.current_effects: List[str] = []
@@ -169,6 +214,14 @@ class DreamspaceNavigator:
             print(f"📁 Output directory: {self.output_dir} (will be cleared on each batch)")
         else:
             print(f"📁 No output directory specified (images will not be saved to disk)")
+        
+        # Show mode status
+        if self.is_multi_prompt_mode:
+            print(f"🌈 Multi-prompt mode: {len(self.prompt_list)} prompts with looping")
+        elif self.interpolation_mode and self.prompt2:
+            print(f"🌈 Two-prompt interpolation mode enabled")
+        else:
+            print(f"🎬 Regular animation mode (wiggle variations)")
     
     def show_image(self, img, window, target_width: int, target_height: int):
         """Display PIL Image in pygame window, scaling to fill screen while maintaining aspect ratio."""
@@ -280,9 +333,168 @@ class DreamspaceNavigator:
         except Exception as e:
             print(f"❌ Error saving images to directory: {e}")
     
+    def save_images_to_directory_with_consecutive_numbering(self, start_frame_number: int = None):
+        """Save all current animation frames to the output directory with consecutive numbering."""
+        if not self.output_dir or not self.img_gen.has_frames():
+            return 0
+        
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            # Save all current frames with consecutive numbering
+            frames = self.img_gen.current_frames
+            if frames:
+                start_num = start_frame_number if start_frame_number is not None else self.total_frames_saved
+                
+                for i, frame in enumerate(frames):
+                    # Determine file extension based on output format
+                    if self.output_format.lower() == "jpeg":
+                        ext = "jpg"
+                    elif self.output_format.lower() == "png":
+                        ext = "png"
+                    else:
+                        ext = "png"  # Default fallback
+                    
+                    frame_number = start_num + i
+                    filename = f"frame_{frame_number:06d}.{ext}"
+                    filepath = os.path.join(self.output_dir, filename)
+                    
+                    # Save with appropriate format and quality
+                    if ext == "jpg":
+                        frame.save(filepath, format='JPEG', quality=90, optimize=True)
+                    else:
+                        frame.save(filepath, format='PNG', optimize=True)
+                
+                print(f"💾 Saved frames {start_num}-{start_num + len(frames) - 1} to {self.output_dir}")
+                return len(frames)
+            
+            return 0
+            
+        except Exception as e:
+            print(f"❌ Error saving images to directory: {e}")
+            return 0
+    
+    def generate_multi_prompt_sequence(self):
+        """Generate interpolated animations between all prompts in the list, with looping."""
+        if not self.is_multi_prompt_mode:
+            return False
+        
+        prompts = self.prompt_list
+        num_prompts = len(prompts)
+        
+        # Create pairs including the loop back to start
+        prompt_pairs = []
+        for i in range(num_prompts):
+            next_i = (i + 1) % num_prompts
+            prompt_pairs.append((prompts[i], prompts[next_i]))
+        
+        print(f"🌈 Starting multi-prompt interpolation sequence:")
+        print(f"📝 {num_prompts} prompts → {len(prompt_pairs)} interpolation segments")
+        print(f"🔄 Including loop back: '{prompts[-1]}' → '{prompts[0]}'")
+        print(f"📊 {self.batch_size} frames per segment = {len(prompt_pairs) * self.batch_size} total frames")
+        
+        # Clear output directory if it exists
+        if self.output_dir:
+            try:
+                os.makedirs(self.output_dir, exist_ok=True)
+                # Clear directory contents
+                for filename in os.listdir(self.output_dir):
+                    file_path = os.path.join(self.output_dir, filename)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path)
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                    except Exception as e:
+                        print(f"⚠️ Failed to delete {file_path}: {e}")
+                print(f"🗑️ Cleared output directory: {self.output_dir}")
+            except Exception as e:
+                print(f"❌ Error preparing output directory: {e}")
+        
+        # Generate each interpolation segment with progress bar
+        self.total_frames_saved = 0
+        all_frames = []
+        
+        # Use a shared latent cookie for the entire sequence to maintain composition
+        if self.latent_cookie is not None:
+            latent_cookie = self.latent_cookie
+            print(f"🍪 Using user-specified latent cookie {latent_cookie} for consistent composition across sequence")
+        else:
+            import random
+            latent_cookie = random.randint(1, 1000000)
+            print(f"🍪 Generated latent cookie {latent_cookie} for consistent composition across sequence")
+        
+        with tqdm(total=len(prompt_pairs), desc="Generating interpolations", unit="segment") as pbar:
+            for i, (prompt1, prompt2) in enumerate(prompt_pairs):
+                segment_start_time = time.time()
+                
+                # Update progress bar description
+                pbar.set_description(f"Segment {i+1}/{len(prompt_pairs)}: '{prompt1[:20]}...' → '{prompt2[:20]}...'")
+                
+                try:
+                    # Generate interpolated embeddings for this segment
+                    request_id = f"multi_prompt_seg_{i:03d}"
+                    frames = self.img_gen.generate_interpolated_embeddings(
+                        prompt1=prompt1,
+                        prompt2=prompt2,
+                        batch_size=self.batch_size,
+                        request_id=request_id,
+                        latent_cookie=latent_cookie,
+                        **self.generation_params
+                    )
+                    
+                    if frames:
+                        all_frames.extend(frames)
+                        
+                        # Save frames with consecutive numbering
+                        frames_saved = self.save_images_to_directory_with_consecutive_numbering(self.total_frames_saved)
+                        self.total_frames_saved += frames_saved
+                        
+                        segment_duration = time.time() - segment_start_time
+                        pbar.set_postfix({
+                            'frames': f"{len(frames)}",
+                            'time': f"{segment_duration:.1f}s",
+                            'rate': f"{len(frames)/segment_duration:.1f} img/s",
+                            'total_frames': self.total_frames_saved
+                        })
+                        
+                    else:
+                        print(f"❌ No frames generated for segment {i+1}")
+                        
+                except Exception as e:
+                    print(f"❌ Error generating segment {i+1}: {e}")
+                
+                pbar.update(1)
+        
+        # Update the current frames to the last generated batch for display
+        if all_frames:
+            print(f"\n✅ Multi-prompt sequence complete!")
+            print(f"📊 Generated {self.total_frames_saved} total frames across {len(prompt_pairs)} segments")
+            print(f"⏱️ Average: {self.batch_size} frames per segment")
+            
+            if self.output_dir:
+                print(f"💾 All frames saved to: {self.output_dir}")
+                print(f"🎬 Ready for video creation: frame_000000.{self.output_format} to frame_{self.total_frames_saved-1:06d}.{self.output_format}")
+            
+            # Set the last batch as current frames for immediate display
+            last_batch_start = len(all_frames) - self.batch_size
+            if last_batch_start >= 0:
+                self.img_gen.current_frames = all_frames[last_batch_start:]
+                self.img_gen.is_interpolated_sequence = True
+                self.img_gen._create_randomized_order()
+            
+            return True
+        else:
+            print(f"❌ Multi-prompt sequence failed - no frames generated")
+            return False
+    
     def generate_initial_batch(self):
         """Generate the initial animation batch."""
-        if self.interpolation_mode and self.prompt2:
+        if self.is_multi_prompt_mode:
+            print(f"🌈 Generating multi-prompt interpolation sequence ({len(self.prompt_list)} prompts)...")
+            return self.generate_multi_prompt_sequence()
+        elif self.interpolation_mode and self.prompt2:
             print(f"🌈 Generating initial interpolated animation batch ({self.batch_size} frames)...")
             print(f"   '{self.initial_prompt}' → '{self.prompt2}'")
         else:
@@ -313,6 +525,10 @@ class DreamspaceNavigator:
             duration = end_time - start_time
             print(f"⏱️ Initial batch generation time: {duration:.2f} seconds ({duration/60:.1f} minutes)")
             print(f"📊 Initial batch rate: {self.batch_size/duration:.1f} images/second")
+        
+        # For multi-prompt mode, we've already generated everything
+        if self.is_multi_prompt_mode:
+            return True
         
         # Start generation in background
         gen_thread = threading.Thread(target=generate_initial)
@@ -616,11 +832,16 @@ def main_with_args():
     args = parse_arguments()
     
     # Check for interpolation mode
-    interpolation_mode = getattr(args, 'interpolation_mode', False) or getattr(args, 'prompt2', None) is not None
+    interpolation_mode = getattr(args, 'interpolation_mode', False) or getattr(args, 'prompt2', None) is not None or getattr(args, 'prompt_list', None) is not None
     prompt2 = getattr(args, 'prompt2', None)
+    prompt_list = getattr(args, 'prompt_list', None)
     
-    if interpolation_mode and not prompt2:
-        print("❌ Interpolation mode requires --prompt2 to be specified")
+    if interpolation_mode and not prompt2 and not prompt_list:
+        print("❌ Interpolation mode requires --prompt2 or --prompt-list to be specified")
+        return
+    
+    if prompt2 and prompt_list:
+        print("❌ Cannot specify both --prompt2 and --prompt-list. Choose one interpolation mode.")
         return
     
     # Get configuration from args
@@ -652,7 +873,9 @@ def main_with_args():
         maximize_window=maximize_window,
         interpolation_mode=interpolation_mode,
         prompt2=prompt2,
-        output_dir=output_dir
+        output_dir=output_dir,
+        prompt_list=prompt_list,
+        latent_cookie=getattr(args, 'latent_cookie', None)
     )
     
     # Set initial configuration
@@ -662,10 +885,17 @@ def main_with_args():
     navigator.animation_speed = args.fps
     
     if interpolation_mode:
-        print(f"🌈 Interpolated Embeddings Mode Enabled")
-        print(f"🔢 Prompt 1: {initial_prompt}")
-        print(f"🔢 Prompt 2: {prompt2}")
-        print(f"📊 Interpolation Steps: {batch_size}")
+        if prompt_list:
+            print(f"🌈 Multi-Prompt Interpolation Mode Enabled")
+            print(f"🔢 Prompts: {prompt_list}")
+            print(f"📊 Interpolation Steps per segment: {batch_size}")
+            print(f"🔄 Total segments (with loop): {len(prompt_list)}")
+            print(f"🎬 Total frames: {len(prompt_list) * batch_size}")
+        else:
+            print(f"🌈 Two-Prompt Interpolation Mode Enabled")
+            print(f"🔢 Prompt 1: {initial_prompt}")
+            print(f"🔢 Prompt 2: {prompt2}")
+            print(f"📊 Interpolation Steps: {batch_size}")
     else:
         # Bifurcated wiggle is always enabled (default method)
         navigator.latent_wiggle = True

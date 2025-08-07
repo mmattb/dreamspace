@@ -104,7 +104,8 @@ class AnimatedRemoteImgGen:
             "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
             "noise_magnitude": kwargs.get("noise_magnitude", 0.3),
             "bifurcation_step": kwargs.get("bifurcation_step", 3),
-            "output_format": kwargs.get("output_format", "jpeg")
+            "output_format": kwargs.get("output_format", "jpeg"),
+            "latent_cookie": kwargs.get("latent_cookie", None)
         }
         
         print(f"🎬 Generating {batch_size} frame animation [{request_id[:8]}]: '{use_prompt[:50]}...'")
@@ -244,7 +245,8 @@ class AnimatedRemoteImgGen:
             "num_inference_steps": kwargs.get("num_inference_steps", 20),
             "guidance_scale": kwargs.get("guidance_scale", 7.5),
             "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
-            "output_format": kwargs.get("output_format", "jpeg")
+            "output_format": kwargs.get("output_format", "jpeg"),
+            "latent_cookie": kwargs.get("latent_cookie", None)
         }
         
         print(f"🎬 Generating {batch_size} interpolated frames [{request_id[:8]}]:")

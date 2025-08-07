@@ -70,8 +70,13 @@ Examples:
     )
     
     parser.add_argument(
+        "--prompt-list", type=str, nargs='+',
+        help="List of prompts for multi-prompt interpolation sequence (enables sequential interpolation through all prompts with looping)"
+    )
+    
+    parser.add_argument(
         "--interpolation-mode", action="store_true",
-        help="Enable interpolated embeddings mode (requires --prompt2)"
+        help="Enable interpolated embeddings mode (requires --prompt2 or --prompt-list)"
     )
     
     # Animation settings
@@ -111,6 +116,11 @@ Examples:
     parser.add_argument(
         "--output-dir", type=str,
         help="Directory to save all generated images (clears directory on each new batch)"
+    )
+    
+    parser.add_argument(
+        "--latent-cookie", type=int,
+        help="Integer cookie for shared latent across all batches (maintains consistent composition)"
     )
     
     # Display options
