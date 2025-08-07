@@ -6,6 +6,8 @@ import torch
 from typing import Dict, Any, Optional
 from PIL import Image
 
+from diffusers import AutoPipelineForText2Image
+
 from ...core.base import ImgGenBackend
 from ...core.utils import no_grad_method
 from ...config.settings import Config, ModelConfig
@@ -87,7 +89,6 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
     
     def _load_pipelines(self):
         """Load the diffusion pipelines using AutoPipeline."""
-        from diffusers import AutoPipelineForText2Image
         
         print(f"🔮 Loading Stable Diffusion 1.5 from {self.model_id} on {self.device}...")
         
@@ -118,7 +119,12 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             print(f"  💾 CPU offload enabled for {self.device}")
         else:
             print(f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)")
-        
+         
+        # Force all models to eval mode
+        self.pipe.unet.eval()
+        self.pipe.vae.eval() 
+        self.pipe.text_encoder.eval()
+
         # Enable memory optimizations
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
@@ -126,6 +132,20 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         except Exception:
             print("⚠️ XFormers not available, using default attention")
         
+        # Enable additional memory optimizations
+        try:
+            self.pipe.enable_attention_slicing(1)  # Slice attention computation for memory efficiency
+            print("✅ Attention slicing enabled")
+        except Exception:
+            print("⚠️ Attention slicing not available")
+        
+        try:
+            if hasattr(self.pipe.vae, 'enable_slicing'):
+                self.pipe.vae.enable_slicing()
+                print("✅ VAE slicing enabled")
+        except Exception:
+            print("⚠️ VAE slicing not available")
+ 
         print(f"✅ Stable Diffusion 1.5 loaded successfully on {self.device}!")
     
     @no_grad_method
@@ -147,15 +167,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         # Setup phase
         setup_start = time.time()
-        
-        # Force all models to eval mode
-        self.pipe.unet.eval()
-        self.pipe.vae.eval() 
-        self.pipe.text_encoder.eval()
-        
-        if hasattr(self.pipe.vae, 'enable_slicing'):
-            self.pipe.vae.enable_slicing()
-
+       
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
@@ -241,11 +253,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             latent_input = torch.cat([latents] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-            # Use torch.no_grad() to prevent gradient accumulation
-            with torch.no_grad():
-                noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=prompt_embeds
-                ).sample
+            noise_pred = self.pipe.unet(
+                latent_input, t, encoder_hidden_states=prompt_embeds
+            ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -286,11 +296,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             latent_input = torch.cat([latents_batch] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-            # Use torch.no_grad() to prevent gradient accumulation
-            with torch.no_grad():
-                noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=batch_prompt_embeds
-                ).sample
+            noise_pred = self.pipe.unet(
+                latent_input, t, encoder_hidden_states=batch_prompt_embeds
+            ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -306,12 +314,10 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         # Step 7: Decode the batch of latents to images
         decode_start = time.time()
         
-        # Use direct VAE decode with explicit no_grad
         vae_start = time.time()
-        with torch.no_grad():
-            # Ensure no computation graph is built
-            latents_batch.requires_grad_(False)
-            images = self.pipe.vae.decode(latents_batch / 0.18215).sample
+        # Ensure latents are on the same device as the VAE
+        latents_batch = latents_batch.to(self.pipe.device)
+        images = self.pipe.vae.decode(latents_batch / 0.18215).sample
         vae_time = time.time() - vae_start
         print(f"🔮 VAE decode completed in {vae_time:.3f}s")
         
@@ -412,15 +418,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         # Setup phase
         setup_start = time.time()
-        
-        # Force all models to eval mode
-        self.pipe.unet.eval()
-        self.pipe.vae.eval() 
-        self.pipe.text_encoder.eval()
-        
-        if hasattr(self.pipe.vae, 'enable_slicing'):
-            self.pipe.vae.enable_slicing()
-
+               
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
@@ -535,10 +533,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             latent_input = torch.cat([latents_batch] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-            with torch.no_grad():
-                noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=batch_combined_embeds
-                ).sample
+            noise_pred = self.pipe.unet(
+                latent_input, t, encoder_hidden_states=batch_combined_embeds
+            ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -554,11 +551,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         # Decode the batch of latents to images
         decode_start = time.time()
         
-        # Use direct VAE decode with explicit no_grad
         vae_start = time.time()
-        with torch.no_grad():
-            latents_batch.requires_grad_(False)
-            images = self.pipe.vae.decode(latents_batch / 0.18215).sample
+        latents_batch = latents_batch.to(self.pipe.device)
+        images = self.pipe.vae.decode(latents_batch / 0.18215).sample
         vae_time = time.time() - vae_start
         print(f"🔮 VAE decode completed in {vae_time:.3f}s")
         
@@ -641,13 +636,7 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         
         # Setup phase (same as original)
         setup_start = time.time()
-        self.pipe.unet.eval()
-        self.pipe.vae.eval() 
-        self.pipe.text_encoder.eval()
         
-        if hasattr(self.pipe.vae, 'enable_slicing'):
-            self.pipe.vae.enable_slicing()
-
         # Set default generator for reproducibility on the correct device
         if 'generator' not in kwargs and 'seed' in kwargs:
             seed = kwargs.pop('seed')
@@ -745,10 +734,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 latent_input = torch.cat([sub_batch_latents] * 2)
                 latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-                with torch.no_grad():
-                    noise_pred = self.pipe.unet(
-                        latent_input, t, encoder_hidden_states=batch_combined_embeds
-                    ).sample
+                noise_pred = self.pipe.unet(
+                    latent_input, t, encoder_hidden_states=batch_combined_embeds
+                ).sample
 
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -759,14 +747,14 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
             # Store the final latents for this sub-batch
-            all_final_latents.append(sub_batch_latents.cpu())  # Move to CPU to free GPU memory
+            all_final_latents.append(sub_batch_latents)  # Keep on GPU
             
             # Clean up sub-batch tensors
             del sub_batch_latents, batch_combined_embeds, batch_prompt_embeds, batch_negative_embeds
             torch.cuda.empty_cache()  # Free GPU memory between sub-batches
         
         # Combine all sub-batch results
-        final_latents_batch = torch.cat(all_final_latents, dim=0).to(self.pipe.device)
+        final_latents_batch = torch.cat(all_final_latents, dim=0)
         
         denoise_time = time.time() - denoise_start
         print(f"🧠 Sub-batched denoising ({num_inference_steps} steps × {total_batch_size} interpolations) completed in {denoise_time:.3f}s")
@@ -782,15 +770,10 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             decode_end_idx = min(decode_idx + decode_sub_batch_size, total_batch_size)
             
             decode_latents = final_latents_batch[decode_idx:decode_end_idx]
-            # Ensure decode_latents is on the same device as the VAE
-            decode_latents = decode_latents.to(self.pipe.device)
-            
-            with torch.no_grad():
-                decode_latents.requires_grad_(False)
-                decoded_images = self.pipe.vae.decode(decode_latents / 0.18215).sample
+            decoded_images = self.pipe.vae.decode(decode_latents / 0.18215).sample
             
             decoded_images = (decoded_images / 2 + 0.5).clamp(0, 1)
-            all_decoded_images.append(decoded_images.cpu())
+            all_decoded_images.append(decoded_images)  # Keep on GPU
             
             del decode_latents, decoded_images
             torch.cuda.empty_cache()
@@ -803,11 +786,11 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
         # Handle output format processing
         if output_format == "tensor":
-            images = final_images.to(self.pipe.device)  # Move back to GPU for output
+            images = final_images  # Already on GPU
             print(f"🚀 Returning tensor format for ultra-fast serialization")
         else:
             # Convert to PIL Images
-            images = final_images.permute(0, 2, 3, 1).float().numpy()
+            images = final_images.cpu().permute(0, 2, 3, 1).float().numpy()  # Move to CPU for PIL conversion
             pil_images = []
             for i in range(images.shape[0]):
                 image_array = (images[i] * 255).astype('uint8')
@@ -855,7 +838,8 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         if embedding1 is None or embedding2 is None:
             return None
         return self._slerp(embedding1, embedding2, alpha)
-    
+
+    @no_grad_method 
     def _extract_text_embeddings(self, prompt: str) -> torch.Tensor:
         """Extract text embeddings from prompt."""
         try:
@@ -867,10 +851,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 return_tensors="pt"
             )
             
-            with torch.no_grad():
-                text_embeddings = self.pipe.text_encoder(
-                    text_inputs.input_ids.to(self.pipe.device)
-                )[0]
+            text_embeddings = self.pipe.text_encoder(
+                text_inputs.input_ids.to(self.pipe.device)
+            )[0]
             
             return text_embeddings
         except Exception:
