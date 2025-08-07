@@ -519,6 +519,71 @@ class AnimatedRemoteImgGen:
             self._create_randomized_order()
             print("🔀 Frame order reshuffled!")
     
+    def async_multi_prompt_generation(self, prompts: List[str], output_dir: str, 
+                                     batch_size: int = 32, request_id: str = None, **kwargs) -> str:
+        """Submit an async multi-prompt interpolation request to the server."""
+        # Set up request tracking
+        if request_id is None:
+            request_id = str(time.time())
+        
+        self.current_request_id = request_id
+        self.cancel_current_request = False
+        
+        request_data = {
+            "prompts": prompts,
+            "output_dir": output_dir,
+            "batch_size": batch_size,
+            "model": self.model,
+            "width": kwargs.get("width", 512),
+            "height": kwargs.get("height", 512),
+            "num_inference_steps": kwargs.get("num_inference_steps", 20),
+            "guidance_scale": kwargs.get("guidance_scale", 7.5),
+            "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
+            "output_format": kwargs.get("output_format", "png"),
+            "latent_cookie": kwargs.get("latent_cookie", None)
+        }
+        
+        print(f"🎬 Submitting async multi-prompt request [{request_id[:8]}]:")
+        print(f"   Prompts: {len(prompts)} ({', '.join(p[:20] + '...' for p in prompts[:3])})")
+        print(f"   Output: {output_dir}")
+        print(f"   Batch size: {batch_size}")
+        
+        try:
+            # Check for cancellation before making request
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled before starting")
+                return None
+            
+            print(f"📡 Sending async multi-prompt request to server...")
+            
+            response = requests.post(
+                f"{self.server_url}/generate_async_multi_prompt",
+                json=request_data,
+                timeout=30  # Short timeout since this is async
+            )
+            
+            # Check for cancellation after request
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled after server response")
+                return None
+            
+            if response.status_code != 200:
+                raise Exception(f"Async multi-prompt request failed: {response.status_code} - {response.text}")
+            
+            result = response.json()
+            job_id = result.get("job_id")
+            
+            print(f"✅ Async multi-prompt request submitted successfully")
+            print(f"   Job ID: {job_id}")
+            print(f"   Status: {result.get('status', 'unknown')}")
+            
+            return job_id
+            
+        except Exception as e:
+            if not (self.cancel_current_request or self.current_request_id != request_id):
+                print(f"❌ Async multi-prompt request error [{request_id[:8]}]: {e}")
+            raise
+
     def get_status(self) -> Dict[str, Any]:
         """Get current status information."""
         return {

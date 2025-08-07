@@ -7,8 +7,12 @@ from io import BytesIO
 import traceback
 import time
 import torch
+import threading
+import os
+import uuid
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -69,9 +73,31 @@ class GenerateInterpolatedEmbeddingsRequest(BaseModel):
     latent_cookie: Optional[int] = Field(None, description="Cookie for shared latent across batches")
 
 
+class AsyncMultiPromptRequest(BaseModel):
+    prompts: List[str] = Field(..., description="List of prompts for multi-prompt interpolation sequence (minimum 2 prompts)")
+    output_dir: str = Field(..., description="Directory where PNG files will be saved")
+    model: Optional[str] = Field("sd15_server", description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'")
+    batch_size: int = Field(8, description="Number of interpolation steps per prompt segment (1-32)")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+    width: Optional[int] = Field(768, description="Image width")
+    height: Optional[int] = Field(768, description="Image height")
+    seed: Optional[int] = Field(None, description="Random seed for consistent generation")
+    latent_cookie: Optional[int] = Field(None, description="Cookie for shared latent across all segments")
+
+
 class BatchImageResponse(BaseModel):
     images: List[str] = Field(..., description="List of base64 encoded images or serialized tensors")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata")
+
+
+class AsyncResponse(BaseModel):
+    success: bool = Field(..., description="Whether the async job was started successfully")
+    job_id: str = Field(..., description="Unique identifier for the background job")
+    message: str = Field(..., description="Human-readable status message")
+    estimated_frames: Optional[int] = Field(None, description="Estimated total number of frames to be generated")
+    estimated_duration: Optional[str] = Field(None, description="Estimated time to completion")
+    output_dir: str = Field(..., description="Directory where PNG files will be saved")
 
 
 class InterpolateRequest(BaseModel):
@@ -210,6 +236,135 @@ async def lifespan(app: FastAPI):
             if backend and hasattr(backend.backend, 'cleanup'):
                 backend.backend.cleanup()
         print(f"🧹 Cleaned up {len(multi_backends)} GPU backends")
+
+
+def _async_multi_prompt_worker(job_id: str, request: AsyncMultiPromptRequest):
+    """Background worker function for async multi-prompt generation.
+    
+    This function handles the entire multi-prompt interpolation sequence,
+    saving PNG files directly to disk as they are generated.
+    """
+    import random
+    import shutil
+    from PIL import Image
+    
+    try:
+        print(f"🌈 [Job {job_id[:8]}] Starting async multi-prompt generation")
+        print(f"📝 [Job {job_id[:8]}] Prompts: {request.prompts}")
+        print(f"📁 [Job {job_id[:8]}] Output directory: {request.output_dir}")
+        
+        start_time = time.time()
+        
+        # Get the backend
+        img_gen = get_model_backend(request.model)
+        
+        # Prepare output directory
+        os.makedirs(request.output_dir, exist_ok=True)
+        
+        # Clear directory contents
+        for filename in os.listdir(request.output_dir):
+            file_path = os.path.join(request.output_dir, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                print(f"⚠️ [Job {job_id[:8]}] Failed to delete {file_path}: {e}")
+        
+        print(f"🗑️ [Job {job_id[:8]}] Cleared output directory")
+        
+        # Prepare generation parameters
+        gen_params = {
+            'guidance_scale': request.guidance_scale,
+            'num_inference_steps': request.num_inference_steps,
+            'width': request.width,
+            'height': request.height,
+            'output_format': 'pil'  # Always use PIL for PNG saving
+        }
+        
+        # Set up shared latent cookie and seed
+        if request.latent_cookie is not None:
+            latent_cookie = request.latent_cookie
+            print(f"🍪 [Job {job_id[:8]}] Using user-specified latent cookie {latent_cookie}")
+        else:
+            latent_cookie = random.randint(1, 1000000)
+            print(f"🍪 [Job {job_id[:8]}] Generated latent cookie {latent_cookie}")
+        
+        if request.seed is not None:
+            shared_seed = request.seed
+            print(f"🎲 [Job {job_id[:8]}] Using user-specified seed {shared_seed}")
+        else:
+            shared_seed = random.randint(0, 2**32 - 1)
+            print(f"🎲 [Job {job_id[:8]}] Generated shared seed {shared_seed}")
+        
+        gen_params['latent_cookie'] = latent_cookie
+        gen_params['seed'] = shared_seed
+        
+        # Create prompt pairs including loop back to start
+        prompts = request.prompts
+        num_prompts = len(prompts)
+        prompt_pairs = []
+        for i in range(num_prompts):
+            next_i = (i + 1) % num_prompts
+            prompt_pairs.append((prompts[i], prompts[next_i]))
+        
+        print(f"🔄 [Job {job_id[:8]}] Created {len(prompt_pairs)} interpolation segments (including loop)")
+        
+        total_frames_saved = 0
+        
+        # Generate each interpolation segment
+        for i, (prompt1, prompt2) in enumerate(prompt_pairs):
+            segment_start_time = time.time()
+            
+            print(f"🔄 [Job {job_id[:8]}] Segment {i+1}/{len(prompt_pairs)}: '{prompt1[:30]}...' → '{prompt2[:30]}...'")
+            
+            try:
+                # Generate interpolated embeddings for this segment
+                result = img_gen.backend.generate_interpolated_embeddings(
+                    prompt1=prompt1,
+                    prompt2=prompt2,
+                    batch_size=request.batch_size,
+                    **gen_params
+                )
+                
+                frames = result.get('images', [])
+                
+                if frames:
+                    # Save each frame as PNG immediately
+                    for frame_idx, frame in enumerate(frames):
+                        global_frame_number = total_frames_saved + frame_idx
+                        filename = f"frame_{global_frame_number:06d}.png"
+                        filepath = os.path.join(request.output_dir, filename)
+                        
+                        frame.save(filepath, format='PNG', optimize=True)
+                        
+                        # Print progress every 4 frames or for first/last frames
+                        if frame_idx == 0 or frame_idx == len(frames) - 1 or (frame_idx + 1) % 4 == 0:
+                            print(f"💾 [Job {job_id[:8]}] Saved {filename}")
+                    
+                    total_frames_saved += len(frames)
+                    
+                    segment_duration = time.time() - segment_start_time
+                    print(f"✅ [Job {job_id[:8]}] Segment {i+1} complete: {len(frames)} frames in {segment_duration:.1f}s")
+                    
+                else:
+                    print(f"❌ [Job {job_id[:8]}] No frames generated for segment {i+1}")
+                    
+            except Exception as e:
+                print(f"❌ [Job {job_id[:8]}] Error in segment {i+1}: {e}")
+                traceback.print_exc()
+        
+        total_duration = time.time() - start_time
+        
+        print(f"✅ [Job {job_id[:8]}] Multi-prompt sequence complete!")
+        print(f"📊 [Job {job_id[:8]}] Generated {total_frames_saved} total frames in {total_duration:.1f}s")
+        print(f"📁 [Job {job_id[:8]}] All frames saved to: {request.output_dir}")
+        print(f"🎬 [Job {job_id[:8]}] Ready for video creation: frame_000000.png to frame_{total_frames_saved-1:06d}.png")
+        
+    except Exception as e:
+        print(f"❌ [Job {job_id[:8]}] Fatal error in async multi-prompt worker: {e}")
+        traceback.print_exc()
 
 
 def create_app(backend_type: str = "sd15_server", 
@@ -694,6 +849,56 @@ def create_app(backend_type: str = "sd15_server",
                         "generation_method": "interpolated_embeddings"
                     }
                 )
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.post("/generate_async_multi_prompt", response_model=AsyncResponse)
+    async def generate_async_multi_prompt(
+        request: AsyncMultiPromptRequest,
+        authenticated: bool = Depends(auth_dependency)
+    ):
+        """Start an asynchronous multi-prompt interpolation sequence generation.
+        
+        This endpoint immediately starts a background thread to handle the generation
+        and returns a job ID. The generation results are saved directly to PNG files
+        in the specified output directory.
+        """
+        try:
+            # Validate request
+            if len(request.prompts) < 2:
+                raise HTTPException(status_code=400, detail="At least 2 prompts are required")
+            
+            if request.batch_size < 1 or request.batch_size > 32:
+                raise HTTPException(status_code=400, detail="Batch size must be between 1 and 32")
+            
+            # Generate unique job ID
+            job_id = str(uuid.uuid4())
+            
+            # Calculate estimates
+            num_segments = len(request.prompts)  # Including loop back to start
+            estimated_frames = num_segments * request.batch_size
+            estimated_duration = f"{estimated_frames * 2}s-{estimated_frames * 4}s"  # Rough estimate
+            
+            # Start background generation
+            thread = threading.Thread(
+                target=_async_multi_prompt_worker,
+                args=(job_id, request),
+                daemon=True
+            )
+            thread.start()
+            
+            return AsyncResponse(
+                success=True,
+                job_id=job_id,
+                message=f"Multi-prompt generation started with {num_segments} segments",
+                estimated_frames=estimated_frames,
+                estimated_duration=estimated_duration,
+                output_dir=request.output_dir
+            )
+            
+        except HTTPException:
+            raise
         except Exception as e:
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(e))
