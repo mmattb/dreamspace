@@ -69,9 +69,13 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         
         memory_per_image_mb = latent_megapixels * 4 * 2 * (5 + 6 + 3)  # More conservative for SD 2.1
         memory_per_image_gb = memory_per_image_mb / 1000
-        
+
         # Calculate how many images we can fit in memory
         max_parallel_images = max(1, int(available_memory_gb / memory_per_image_gb))
+        
+        # We are too conservative in the tiny case...
+        if megapixels < 1:
+            max_parallel_images *= 2
         
         # Don't exceed the total batch size
         sub_batch_size = min(max_parallel_images, total_batch_size)
