@@ -75,6 +75,8 @@ from dreamspace.core.remote_generator import AnimatedRemoteImgGen
 from dreamspace.cli.navigation import (
     parse_arguments, get_image_dimensions, get_interactive_config, print_welcome_message
 )
+# Import shared display utilities
+from dreamspace.cli.display import ImageDisplay
 
 MORPHS = [
     "figure cloaked in white",
@@ -110,50 +112,32 @@ class DreamspaceNavigator:
         self.current_prompt_pair_index = 0
         self.total_frames_saved = 0  # Track consecutive frame numbering
         
-        # Initialize pygame
-        pygame.init()
-        pygame.font.init()
+        # Initialize display using shared ImageDisplay class
+        self.display = ImageDisplay(
+            maximize=self.maximize_window,
+            window_title="Dreamspace Navigator - Animated"
+        )
         
-        # Calculate optimal window and display sizes
+        # Get display dimensions from ImageDisplay
+        self.window_width = self.display.window_width
+        self.window_height = self.display.window_height
+        
+        # Set image generation size (keep original size for generation)
+        self.image_width = self.original_image_width
+        self.image_height = self.original_image_height
+        
         if self.maximize_window:
-            try:
-                # Use screeninfo to get the actual screen resolution
-                monitor = get_monitors()[0]  # Get the primary monitor
-                screen_width, screen_height = monitor.width, monitor.height
-                print(f"🔍 Using screeninfo resolution: {screen_width}x{screen_height}")
-            except Exception as e:
-                print(f"❌ Failed to get resolution with screeninfo: {e}")
-                # Fallback to pygame detection
-                info = pygame.display.Info()
-                screen_width, screen_height = info.current_w, info.current_h
-                print(f"🔍 Using pygame resolution (fallback): {screen_width}x{screen_height}")
-
-            # Use full screen dimensions for window
-            self.window_width = screen_width
-            self.window_height = screen_height
-
-            # Keep original generation size - don't scale up generation!
-            self.image_width = self.original_image_width
-            self.image_height = self.original_image_height
-
+            print(f"🖥️ Screen size: {self.window_width}x{self.window_height}")
+            print(f"🎨 Generation size: {self.image_width}x{self.image_height} (unchanged)")
+            print(f"🪟 Window size: {self.window_width}x{self.window_height} (fullscreen)")
             # Calculate display scale factor for reference
             display_scale = max(self.window_width / self.image_width, 
                                 self.window_height / self.image_height)
-
-            print(f"🖥️ Screen size: {screen_width}x{screen_height}")
-            print(f"🎨 Generation size: {self.image_width}x{self.image_height} (unchanged)")
-            print(f"🪟 Window size: {self.window_width}x{self.window_height} (fullscreen)")
             print(f"🔍 Display scale: {display_scale:.2f}x (images will be scaled up for display)")
-            
         else:
-            # Use original size for both window and generation
-            self.window_width = self.image_width = self.original_image_width
-            self.window_height = self.image_height = self.original_image_height
+            print(f"🖼️ Using image size for both generation and display: {self.image_width}x{self.image_height}")
         
-        self.window = pygame.display.set_mode((self.window_width, self.window_height), 
-                                             pygame.FULLSCREEN if self.maximize_window else 0)
-        pygame.display.set_caption("Dreamspace Navigator - Animated")
-        self.font = pygame.font.Font(None, 20)
+        # Get pygame clock from display's pygame instance
         self.clock = pygame.time.Clock()
         
         # Initialize image generator
@@ -162,8 +146,12 @@ class DreamspaceNavigator:
             self.img_gen = AnimatedRemoteImgGen(server_url, initial_prompt, model)
         except Exception as e:
             print(f"❌ Failed to connect: {e}")
-            pygame.quit()
+            self.display.cleanup()
             raise
+        
+        print(f"✅ Navigator initialized: {self.image_width}x{self.image_height} → {self.window_width}x{self.window_height}")
+        
+        # Show output directory status
         
         # Animation state
         self.animation_enabled = True
@@ -211,68 +199,19 @@ class DreamspaceNavigator:
         else:
             print(f"🎬 Regular animation mode (wiggle variations)")
     
-    def show_image(self, img, window, target_width: int, target_height: int):
-        """Display PIL Image in pygame window, scaling to fill screen while maintaining aspect ratio."""
-        if img is None:
-            return
-        
-        # Calculate the scaling to fill the screen (touch opposite boundaries)
-        img_width, img_height = img.size
-        
-        # Calculate scale factors for both dimensions
-        scale_x = target_width / img_width
-        scale_y = target_height / img_height
-        
-        # Use the SMALLER scale factor to ensure image fits completely (touches 2 opposite sides, black borders on other 2)
-        scale = min(scale_x, scale_y)
-        
-        # Calculate new dimensions
-        new_width = int(img_width * scale)
-        new_height = int(img_height * scale)
-        
-        # Resize image to calculated dimensions
-        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
-        # Center the image in the window (black borders will appear on the sides that don't touch)
-        x_offset = (target_width - new_width) // 2
-        y_offset = (target_height - new_height) // 2
-        
-        # Clear the window with black background
-        window.fill((0, 0, 0))
-        
-        # Convert PIL image to pygame surface
-        mode = img.mode
-        size = img.size
-        data = img.tobytes()
-        py_img = pygame.image.fromstring(data, size, mode)
-        
-        # Blit the image (will crop if larger than window)
-        window.blit(py_img, (x_offset, y_offset))
-    
     def draw_ui(self, status_text: List[str], frame_info: str, generation_status: str):
-        """Draw UI overlay."""
-        # Semi-transparent overlay
-        overlay = pygame.Surface((self.window_width, 100))
-        overlay.set_alpha(180)
-        overlay.fill((0, 0, 0))
-        self.window.blit(overlay, (0, self.window_height - 100))
+        """Draw UI overlay using the shared display system."""
+        # Draw status information in multiple text overlays
+        if status_text:
+            # Combine status lines into a single text block
+            combined_status = " | ".join(status_text)
+            self.display.draw_text_overlay(combined_status, "bottom-left")
         
-        # Status text
-        y_offset = self.window_height - 92
-        for line in status_text:
-            text_surface = self.font.render(line, True, (255, 255, 255))
-            self.window.blit(text_surface, (10, y_offset))
-            y_offset += 20
-        
-        # Frame info
         if frame_info:
-            frame_surface = self.font.render(frame_info, True, (0, 255, 0))
-            self.window.blit(frame_surface, (10, self.window_height - 22))
+            self.display.draw_text_overlay(frame_info, "top-right")
         
-        # Generation status
         if generation_status:
-            gen_surface = self.font.render(generation_status, True, (255, 255, 0))
-            self.window.blit(gen_surface, (10, self.window_height - 42))
+            self.display.draw_text_overlay(generation_status, "top-left")
     
     def save_images_to_directory(self):
         """Save all current animation frames to the output directory."""
@@ -536,11 +475,11 @@ class DreamspaceNavigator:
         # Show loading screen
         loading_frame = 0
         while gen_thread.is_alive():
-            self.window.fill((20, 20, 30))
+            # Clear display and show loading message
+            self.display.window.fill((20, 20, 30))
             loading_text = f"Generating animation batch... {'.' * (loading_frame % 4)}"
-            text_surface = self.font.render(loading_text, True, (255, 255, 255))
-            self.window.blit(text_surface, (10, self.window_height // 2))
-            pygame.display.flip()
+            self.display.draw_text_overlay(loading_text, "bottom-left")
+            self.display.update()
             pygame.time.wait(100)
             loading_frame += 1
             
@@ -548,7 +487,7 @@ class DreamspaceNavigator:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     print("🛑 Stopping generation...")
-                    pygame.quit()
+                    self.display.cleanup()
                     return False
         
         gen_thread.join()
@@ -774,10 +713,9 @@ class DreamspaceNavigator:
                 self.img_gen.advance_frame()
             
             # Draw current frame
-            self.window.fill((0, 0, 0))
             current_frame = self.img_gen.get_current_frame()
             if current_frame:
-                self.show_image(current_frame, self.window, self.window_width, self.window_height)
+                self.display.show_image(current_frame)
             
             # Prepare UI status
             status = self.img_gen.get_status()
@@ -808,7 +746,8 @@ class DreamspaceNavigator:
             # Draw UI
             self.draw_ui(status_lines, frame_info, generation_status)
             
-            pygame.display.flip()
+            # Update display
+            self.display.update()
             self.clock.tick(self.animation_speed if self.animation_enabled else 30)
             frame_counter += 1
         
@@ -819,7 +758,7 @@ class DreamspaceNavigator:
             self.img_gen.cancel_current_generation()
             self.generation_thread.join(timeout=3)
         
-        pygame.quit()
+        self.display.cleanup()
         print("👋 Goodbye!")
 
 
