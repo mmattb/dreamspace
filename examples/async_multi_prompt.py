@@ -154,7 +154,7 @@ def send_async_request(args: argparse.Namespace) -> bool:
         print(f"🚀 Connecting to server: {args.server}")
         
         # Initialize the remote generator (connection is tested automatically)
-        generator = AnimatedRemoteImgGen(args.server, args.model)
+        generator = AnimatedRemoteImgGen(args.server, model=args.model)
         
         print(f"✅ Connected successfully!")
         print(f"📝 Prompts: {args.prompts}")

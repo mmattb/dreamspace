@@ -4,6 +4,8 @@ import asyncio
 import base64
 import time
 from io import BytesIO
+import random
+import shutil
 import traceback
 import time
 import torch
@@ -244,14 +246,11 @@ def _async_multi_prompt_worker(job_id: str, request: AsyncMultiPromptRequest):
     This function handles the entire multi-prompt interpolation sequence,
     saving PNG files directly to disk as they are generated.
     """
-    import random
-    import shutil
-    from PIL import Image
-    
     try:
         print(f"🌈 [Job {job_id[:8]}] Starting async multi-prompt generation")
         print(f"📝 [Job {job_id[:8]}] Prompts: {request.prompts}")
         print(f"📁 [Job {job_id[:8]}] Output directory: {request.output_dir}")
+        print(f"🎯 [Job {job_id[:8]}] Requested model: {request.model}")
         
         start_time = time.time()
         
@@ -775,7 +774,6 @@ def create_app(backend_type: str = "sd15_server",
             img_gen = get_img_gen()
             backend = img_gen.backend
             
-            import torch
             embedding1 = torch.tensor(request.embedding1)
             embedding2 = torch.tensor(request.embedding2)
             

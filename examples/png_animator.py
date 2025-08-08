@@ -152,7 +152,12 @@ def main():
             # Get current frame and display it
             current_frame = animator.get_current_frame()
             if current_frame:
-                display.show_image(current_frame)
+                try:
+                    display.show_image(current_frame)
+                except OSError:
+                    import sys
+                    sys.stderr.write(f"Error rendering frame {frame_count}\n")
+                    raise
                 
                 # Draw frame info overlay
                 frame_info = animator.get_frame_info()
