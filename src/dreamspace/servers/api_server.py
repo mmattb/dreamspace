@@ -88,6 +88,26 @@ class AsyncMultiPromptRequest(BaseModel):
     latent_cookie: Optional[int] = Field(None, description="Cookie for shared latent across all segments")
 
 
+class AsyncAdaptiveMultiPromptRequest(BaseModel):
+    prompts: List[str] = Field(..., description="List of prompts for multi-prompt interpolation sequence (minimum 2 prompts)")
+    output_dir: str = Field(..., description="Directory where PNG files will be saved")
+    model: Optional[str] = Field("sd15_server", description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'")
+    base_batch_size: int = Field(100, description="Initial number of uniform interpolation steps per prompt segment")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+    width: Optional[int] = Field(768, description="Final image width")
+    height: Optional[int] = Field(768, description="Final image height")
+    seed: Optional[int] = Field(None, description="Random seed for consistent generation")
+    latent_cookie: Optional[int] = Field(None, description="Cookie for shared latent across all segments")
+    metric: Optional[str] = Field("mse", description="Perceptual metric: 'lpips', 'ssim', or 'mse'")
+    threshold: Optional[float] = Field(None, description="If set, subdivide until adjacent distances <= threshold")
+    target_frames_per_segment: Optional[int] = Field(None, description="If set, resample to exactly K frames per segment using importance resampling")
+    preview_size: int = Field(256, description="Preview resolution for metric computation")
+    max_depth: int = Field(5, description="Maximum refinement rounds for threshold mode")
+    save_intermediate: bool = Field(False, description="If true, save preview frames to _preview for debugging")
+    max_frames_total: Optional[int] = Field(None, description="Optional global cap on frames across all segments")
+
+
 class BatchImageResponse(BaseModel):
     images: List[str] = Field(..., description="List of base64 encoded images or serialized tensors")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata")
@@ -363,6 +383,278 @@ def _async_multi_prompt_worker(job_id: str, request: AsyncMultiPromptRequest):
         
     except Exception as e:
         print(f"❌ [Job {job_id[:8]}] Fatal error in async multi-prompt worker: {e}")
+        traceback.print_exc()
+
+
+def _downscale_image(img: Image.Image, size: int) -> Image.Image:
+    try:
+        return img.resize((size, size), Image.LANCZOS)
+    except Exception:
+        return img.resize((size, size))
+
+
+def _to_float_np(img: Image.Image):
+    try:
+        import numpy as _np  # type: ignore
+    except Exception:
+        return None
+    arr = _np.asarray(img.convert('RGB'), dtype=_np.float32) / 255.0
+    return arr
+
+
+def _compute_metric(img_a: Image.Image, img_b: Image.Image, metric: str) -> float:
+    metric = (metric or 'mse').lower()
+    # LPIPS if available
+    if metric == 'lpips':
+        try:
+            import torch as _torch  # type: ignore
+            import lpips  # type: ignore
+            loss_fn = lpips.LPIPS(net='vgg')
+            def pil_to_t(img):
+                import numpy as _np  # type: ignore
+                arr = _np.asarray(img.convert('RGB'), dtype=_np.float32) / 255.0
+                t = _torch.from_numpy(arr).permute(2,0,1).unsqueeze(0)
+                t = t * 2.0 - 1.0
+                return t
+            d = loss_fn(pil_to_t(img_a), pil_to_t(img_b))
+            return float(d.item())
+        except Exception:
+            metric = 'ssim'
+    if metric == 'ssim':
+        try:
+            from skimage.metrics import structural_similarity as _ssim  # type: ignore
+            a = _to_float_np(img_a)
+            b = _to_float_np(img_b)
+            if a is None or b is None:
+                raise RuntimeError('numpy not available')
+            # new skimage uses channel_axis
+            try:
+                val = _ssim(a, b, channel_axis=2)
+            except TypeError:
+                val = _ssim(a, b, multichannel=True)
+            return float(1.0 - val)
+        except Exception:
+            metric = 'mse'
+    # Fallback MSE (pure PIL, no numpy required)
+    from PIL import ImageChops as _ImageChops  # type: ignore
+    a = img_a.convert('RGB')
+    b = img_b.convert('RGB')
+    w, h = a.size
+    total = max(1, w * h * 3)
+    sq_sum = 0
+    for ch in range(3):
+        diff = _ImageChops.difference(a.getchannel(ch), b.getchannel(ch))
+        hist = diff.histogram()
+        sq_sum += sum((i * i) * c for i, c in enumerate(hist))
+    return float(sq_sum / (total * 255.0 * 255.0))
+
+
+def _importance_resample(alphas: List[float], images: List[Image.Image], target_k: int, metric: str) -> List[float]:
+    if target_k <= 2 or len(alphas) <= 2:
+        return [alphas[0], alphas[-1]] if target_k == 2 else alphas[:target_k]
+    dists = []
+    for i in range(len(images) - 1):
+        d = _compute_metric(images[i], images[i+1], metric)
+        dists.append(max(0.0, d))
+    cum = [0.0]
+    for d in dists:
+        cum.append(cum[-1] + d)
+    total = cum[-1] if cum[-1] > 0 else 1e-6
+    target = [i * (total / (target_k - 1)) for i in range(target_k)]
+    out = []
+    j = 0
+    for t in target:
+        while j < len(cum) - 1 and cum[j+1] < t:
+            j += 1
+        if j >= len(cum) - 1:
+            out.append(alphas[-1])
+        else:
+            c0, c1 = cum[j], cum[j+1]
+            a0, a1 = alphas[j], alphas[j+1]
+            if c1 == c0:
+                out.append(a0)
+            else:
+                w = (t - c0) / (c1 - c0)
+                out.append(a0 + w * (a1 - a0))
+    out[0] = alphas[0]
+    out[-1] = alphas[-1]
+    # dedup tiny deltas
+    dedup = []
+    for a in out:
+        if not dedup or abs(a - dedup[-1]) > 1e-6:
+            dedup.append(a)
+    return dedup
+
+
+def _async_adaptive_multi_prompt_worker(job_id: str, request: AsyncAdaptiveMultiPromptRequest):
+    import math
+    try:
+        print(f"🌈 [Job {job_id[:8]}] Starting adaptive async multi-prompt generation")
+        print(f"📝 [Job {job_id[:8]}] Prompts: {request.prompts}")
+        print(f"📁 [Job {job_id[:8]}] Output directory: {request.output_dir}")
+        print(f"🎯 [Job {job_id[:8]}] Requested model: {request.model}")
+        mode_msg = 'threshold=' + str(request.threshold) if request.threshold is not None else ('target_frames=' + str(request.target_frames_per_segment) if request.target_frames_per_segment else 'uniform')
+        print(f"🧮 [Job {job_id[:8]}] Mode: {mode_msg} | base_batch_size={request.base_batch_size}")
+        start_time = time.time()
+
+        img_gen = get_model_backend(request.model)
+        backend = img_gen.backend
+
+        os.makedirs(request.output_dir, exist_ok=True)
+        preview_dir = os.path.join(request.output_dir, "_preview") if request.save_intermediate else None
+        if preview_dir:
+            os.makedirs(preview_dir, exist_ok=True)
+
+        # Clear directory (keep _preview if saving intermediates)
+        for filename in os.listdir(request.output_dir):
+            if request.save_intermediate and filename == "_preview":
+                continue
+            path = os.path.join(request.output_dir, filename)
+            try:
+                if os.path.isfile(path) or os.path.islink(path):
+                    os.unlink(path)
+                elif os.path.isdir(path):
+                    shutil.rmtree(path)
+            except Exception as e:
+                print(f"⚠️ [Job {job_id[:8]}] Failed to delete {path}: {e}")
+
+        print(f"🗑️ [Job {job_id[:8]}] Cleared output directory")
+
+        gen_params = {
+            'guidance_scale': request.guidance_scale,
+            'num_inference_steps': request.num_inference_steps,
+            'output_format': 'pil',
+            'latent_cookie': request.latent_cookie if request.latent_cookie is not None else random.randint(1, 1000000),
+            'seed': request.seed if request.seed is not None else random.randint(0, 2**32 - 1),
+        }
+        if request.latent_cookie is None:
+            print(f"🍪 [Job {job_id[:8]}] Generated latent cookie {gen_params['latent_cookie']}")
+        else:
+            print(f"🍪 [Job {job_id[:8]}] Using user-specified latent cookie {gen_params['latent_cookie']}")
+        if request.seed is None:
+            print(f"🎲 [Job {job_id[:8]}] Generated shared seed {gen_params['seed']}")
+        else:
+            print(f"🎲 [Job {job_id[:8]}] Using user-specified seed {gen_params['seed']}")
+
+        prompts = request.prompts
+        num_prompts = len(prompts)
+        prompt_pairs = [(prompts[i], prompts[(i+1) % num_prompts]) for i in range(num_prompts)]
+        print(f"🔄 [Job {job_id[:8]}] Created {len(prompt_pairs)} interpolation segments (including loop)")
+
+        metric_name = (request.metric or 'mse').lower()
+        base_n = max(2, int(request.base_batch_size))
+        preview_size = int(request.preview_size)
+        target_K = int(request.target_frames_per_segment) if request.target_frames_per_segment else None
+        threshold = float(request.threshold) if request.threshold is not None else None
+        max_depth = int(request.max_depth)
+
+        total_frames_saved = 0
+        global_frame_number = 0
+
+        def render_alphas(prompt1, prompt2, alphas: List[float], width: int, height: int):
+            images = []
+            if hasattr(backend, 'generate_interpolated_embeddings_at_alphas'):
+                res = backend.generate_interpolated_embeddings_at_alphas(
+                    prompt1=prompt1,
+                    prompt2=prompt2,
+                    alphas=alphas,
+                    width=width,
+                    height=height,
+                    **gen_params
+                )
+                images = res.get('images', [])
+            else:
+                bs = max(2, len(alphas))
+                res = backend.generate_interpolated_embeddings(
+                    prompt1=prompt1,
+                    prompt2=prompt2,
+                    batch_size=bs,
+                    width=width,
+                    height=height,
+                    **gen_params
+                )
+                cand = res.get('images', [])
+                if bs > 1 and cand:
+                    grid = [i/(bs-1) for i in range(bs)]
+                    for a in alphas:
+                        idx = min(range(bs), key=lambda k: abs(grid[k]-a))
+                        images.append(cand[idx])
+                elif cand:
+                    images.append(cand[0])
+            return images
+
+        for seg_idx, (p1, p2) in enumerate(prompt_pairs):
+            seg_start = time.time()
+            print(f"🔄 [Job {job_id[:8]}] Segment {seg_idx+1}/{len(prompt_pairs)}: '{p1[:30]}...' → '{p2[:30]}...'")
+
+            alphas = [i/(base_n-1) for i in range(base_n)] if base_n > 1 else [0.0]
+            preview_imgs = render_alphas(p1, p2, alphas, preview_size, preview_size)
+            if request.save_intermediate and preview_dir:
+                for idx, img in enumerate(preview_imgs):
+                    img.save(os.path.join(preview_dir, f"seg{seg_idx:02d}_pre_{idx:03d}.png"), format='PNG', optimize=True)
+
+            if target_K:
+                final_alphas = _importance_resample(alphas, preview_imgs, target_K, metric_name)
+                final_alphas = sorted(set(round(a,6) for a in final_alphas))
+            elif threshold is not None:
+                def pair_dists(imgs):
+                    return [_compute_metric(imgs[i], imgs[i+1], metric_name) for i in range(len(imgs)-1)]
+                dists = pair_dists(preview_imgs)
+                depth = 0
+                while depth < max_depth:
+                    mids = []
+                    for i, dv in enumerate(dists):
+                        if dv > threshold:
+                            mids.append((alphas[i] + alphas[i+1]) / 2.0)
+                    mids = sorted(set(round(m,6) for m in mids))
+                    if not mids:
+                        break
+                    mid_imgs = render_alphas(p1, p2, mids, preview_size, preview_size)
+                    # merge
+                    new_a, new_i = [], []
+                    m_idx = 0
+                    for i in range(len(preview_imgs)-1):
+                        new_a.append(alphas[i]); new_i.append(preview_imgs[i])
+                        mid_val = (alphas[i] + alphas[i+1]) / 2.0
+                        while m_idx < len(mids) and abs(mids[m_idx] - mid_val) <= 1e-6:
+                            new_a.append(mids[m_idx]); new_i.append(mid_imgs[m_idx]); m_idx += 1
+                    new_a.append(alphas[-1]); new_i.append(preview_imgs[-1])
+                    alphas, preview_imgs = new_a, new_i
+                    dists = pair_dists(preview_imgs)
+                    depth += 1
+                    print(f"  🧪 [Job {job_id[:8]}] Refinement round {depth}: frames={len(alphas)} (violations={sum(1 for x in dists if x>threshold)})")
+                    if request.max_frames_total is not None and (total_frames_saved + len(alphas)) > int(request.max_frames_total):
+                        print(f"  ⛔ [Job {job_id[:8]}] Max frames total reached during refinement")
+                        break
+                final_alphas = alphas
+            else:
+                final_alphas = alphas
+
+            # Full-res render
+            full_imgs = []
+            CHUNK = 64
+            for s in range(0, len(final_alphas), CHUNK):
+                sub = final_alphas[s:s+CHUNK]
+                imgs = render_alphas(p1, p2, sub, request.width, request.height)
+                full_imgs.extend(imgs)
+
+            for frame in full_imgs:
+                filename = f"frame_{global_frame_number:06d}.png"
+                frame.save(os.path.join(request.output_dir, filename), format='PNG', optimize=True)
+                global_frame_number += 1
+                total_frames_saved += 1
+                if global_frame_number % 8 == 0 or global_frame_number < 4:
+                    print(f"💾 [Job {job_id[:8]}] Saved {filename}")
+
+            seg_dur = time.time() - seg_start
+            print(f"✅ [Job {job_id[:8]}] Segment {seg_idx+1} complete: {len(full_imgs)} frames in {seg_dur:.1f}s")
+
+        total_duration = time.time() - start_time
+        print(f"✅ [Job {job_id[:8]}] Adaptive multi-prompt sequence complete!")
+        print(f"📊 [Job {job_id[:8]}] Generated {total_frames_saved} total frames in {total_duration:.1f}s")
+        print(f"📁 [Job {job_id[:8]}] All frames saved to: {request.output_dir}")
+    except Exception as e:
+        print(f"❌ [Job {job_id[:8]}] Fatal error in adaptive async worker: {e}")
         traceback.print_exc()
 
 
@@ -865,130 +1157,76 @@ def create_app(backend_type: str = "sd15_server",
             # Validate request
             if len(request.prompts) < 2:
                 raise HTTPException(status_code=400, detail="At least 2 prompts are required")
-            
-            #if request.batch_size < 1 or request.batch_size > 32:
-            #    raise HTTPException(status_code=400, detail="Batch size must be between 1 and 32")
-            
-            # Generate unique job ID
+            if request.batch_size < 1 or request.batch_size > 32:
+                raise HTTPException(status_code=400, detail="batch_size must be between 1 and 32")
+            if request.width < 256 or request.height < 256:
+                raise HTTPException(status_code=400, detail="width and height must be at least 256")
+            if request.guidance_scale <= 0:
+                raise HTTPException(status_code=400, detail="guidance_scale must be positive")
+            if request.num_inference_steps < 1:
+                raise HTTPException(status_code=400, detail="num_inference_steps must be at least 1")
+
             job_id = str(uuid.uuid4())
-            
-            # Calculate estimates
-            num_segments = len(request.prompts)  # Including loop back to start
+            num_segments = len(request.prompts)
             estimated_frames = num_segments * request.batch_size
-            estimated_duration = f"{estimated_frames * 2}s-{estimated_frames * 4}s"  # Rough estimate
-            
-            # Start background generation
+            estimated_duration = f"{estimated_frames * 2}s-{estimated_frames * 4}s"
+
             thread = threading.Thread(
                 target=_async_multi_prompt_worker,
                 args=(job_id, request),
                 daemon=True
             )
             thread.start()
-            
+
             return AsyncResponse(
                 success=True,
                 job_id=job_id,
-                message=f"Multi-prompt generation started with {num_segments} segments",
+                message=f"Async multi-prompt generation started with {num_segments} segments",
                 estimated_frames=estimated_frames,
                 estimated_duration=estimated_duration,
                 output_dir=request.output_dir
             )
-            
         except HTTPException:
             raise
         except Exception as e:
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(e))
     
+    @app.post("/generate_async_adaptive_multi_prompt", response_model=AsyncResponse)
+    async def generate_async_adaptive_multi_prompt(
+        request: AsyncAdaptiveMultiPromptRequest,
+        authenticated: bool = Depends(auth_dependency)
+    ):
+        try:
+            if len(request.prompts) < 2:
+                raise HTTPException(status_code=400, detail="At least 2 prompts are required")
+            if request.base_batch_size < 2:
+                raise HTTPException(status_code=400, detail="base_batch_size must be at least 2")
+
+            job_id = str(uuid.uuid4())
+            num_segments = len(request.prompts)
+            estimated_frames = num_segments * request.base_batch_size
+            estimated_duration = f"{estimated_frames * 2}s-{estimated_frames * 4}s"
+
+            thread = threading.Thread(
+                target=_async_adaptive_multi_prompt_worker,
+                args=(job_id, request),
+                daemon=True
+            )
+            thread.start()
+
+            return AsyncResponse(
+                success=True,
+                job_id=job_id,
+                message=f"Adaptive multi-prompt generation started with {num_segments} segments",
+                estimated_frames=estimated_frames,
+                estimated_duration=estimated_duration,
+                output_dir=request.output_dir
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
     return app
-
-
-def run_server(backend_type: str = "kandinsky_local",
-               host: str = "localhost",
-               port: int = 8000,
-               workers: int = 1,
-               enable_auth: bool = False,
-               api_key: Optional[str] = None,
-               gpus: Optional[str] = None,
-               disable_safety_checker: bool = False):
-    """Run the image generation server.
-    
-    Args:
-        backend_type: Type of backend to use
-        host: Host to bind to
-        port: Port to bind to
-        workers: Number of worker processes
-        enable_auth: Whether to enable authentication
-        api_key: API key for authentication
-        gpus: GPU selection - 'auto', '0', '1', '0,1', or specific GPU IDs
-        disable_safety_checker: Disable NSFW safety checker for SD 1.5
-    """
-    # Store configuration for backend creation
-    app_state["gpu_selection"] = gpus
-    app_state["disable_safety_checker"] = disable_safety_checker
-    
-    app = create_app(backend_type, enable_auth, api_key)
-    
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        workers=workers,
-        log_level="info"
-    )
-
-
-if __name__ == "__main__":
-    import argparse
-    import os
-    
-    parser = argparse.ArgumentParser(description="Dreamspace Co-Pilot API Server")
-    parser.add_argument("--backend", default="kandinsky21_server", 
-                       choices=[
-                           "kandinsky_local", "kandinsky21_server",
-                           "sd_local", "sd15_server", "sd21_server",
-                           "remote"
-                       ],
-                       help="Backend type to use")
-    parser.add_argument("--host", default="localhost", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
-    parser.add_argument("--workers", type=int, default=1, help="Number of workers")
-    parser.add_argument("--auth", action="store_true", help="Enable authentication")
-    parser.add_argument("--api-key", help="API key for authentication")
-    
-    # GPU selection arguments
-    parser.add_argument("--gpus", type=str, default="auto",
-                       help="GPU selection: 'auto' (use all), '0' (first GPU), '1' (second GPU), '0,1' (both GPUs), or specific GPU IDs")
-    parser.add_argument("--gpu-memory-fraction", type=float, default=0.9,
-                       help="Fraction of GPU memory to use (0.1-1.0)")
-    
-    # Safety checker arguments
-    parser.add_argument("--disable-safety-checker", action="store_true",
-                       help="Disable NSFW safety checker for SD 1.5 (fixes false positives)")
-    
-    args = parser.parse_args()
-    
-    # Set GPU environment based on selection
-    if args.gpus != "auto":
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
-        print(f"🎯 GPU Selection: Using GPU(s) {args.gpus}")
-    else:
-        print("🎯 GPU Selection: Auto (using all available GPUs)")
-    
-    print(f"🚀 Starting server with backend: {args.backend}")
-    print(f"🌐 Binding to: {args.host}:{args.port}")
-    if args.gpus != "auto":
-        print(f"🎮 GPU Configuration: {args.gpus} (memory fraction: {args.gpu_memory_fraction})")
-    if args.disable_safety_checker:
-        print("🚫 NSFW safety checker disabled (fixes false positives)")
-    
-    run_server(
-        backend_type=args.backend,
-        host=args.host,
-        port=args.port,
-        workers=args.workers,
-        enable_auth=args.auth,
-        api_key=args.api_key,
-        gpus=args.gpus,
-        disable_safety_checker=args.disable_safety_checker
-    )

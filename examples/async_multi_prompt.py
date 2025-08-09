@@ -82,7 +82,7 @@ def parse_arguments() -> argparse.Namespace:
     # Generation parameters
     parser.add_argument(
         "--batch-size", type=int, default=8,
-        help="Number of interpolation steps per prompt segment (default: 8)"
+        help="Number of interpolation steps per prompt segment (default: 8). In --adaptive mode, used as the base preview batch size."
     )
     
     parser.add_argument(
@@ -114,6 +114,40 @@ def parse_arguments() -> argparse.Namespace:
         "--latent-cookie", type=int,
         help="Integer cookie for shared latent across all segments (maintains consistent composition)"
     )
+
+    # Adaptive mode options
+    parser.add_argument(
+        "--adaptive", action="store_true",
+        help="Use adaptive interpolation density (server decides frames per segment based on perceptual changes)"
+    )
+    parser.add_argument(
+        "--metric", type=str, default="mse", choices=["lpips", "ssim", "mse"],
+        help="Perceptual metric for adaptive mode (default: mse)"
+    )
+    parser.add_argument(
+        "--threshold", type=float,
+        help="Adaptive threshold: subdivide where adjacent frames differ more than this value"
+    )
+    parser.add_argument(
+        "--target-frames-per-segment", type=int,
+        help="Adaptive target: importance-resample each segment to exactly this many frames"
+    )
+    parser.add_argument(
+        "--preview-size", type=int, default=256,
+        help="Preview size for adaptive metric computation (default: 256)"
+    )
+    parser.add_argument(
+        "--max-depth", type=int, default=5,
+        help="Max refinement rounds for threshold mode (default: 5)"
+    )
+    parser.add_argument(
+        "--save-intermediate", action="store_true",
+        help="Save preview frames to output_dir/_preview for debugging"
+    )
+    parser.add_argument(
+        "--max-frames-total", type=int,
+        help="Optional global cap on total frames across all segments in adaptive mode"
+    )
     
     return parser.parse_args()
 
@@ -124,18 +158,6 @@ def validate_arguments(args: argparse.Namespace) -> bool:
         print("❌ Error: At least 2 prompts are required for interpolation")
         return False
     
-    #if args.batch_size < 1 or args.batch_size > 32:
-    #    print("❌ Error: Batch size must be between 1 and 32")
-    #    return False
-    
-    #if args.width < 256 or args.width > 2048 or args.width % 64 != 0:
-    #    print("❌ Error: Width must be between 256-2048 and divisible by 64")
-    #    return False
-    #    
-    #if args.height < 256 or args.height > 2048 or args.height % 64 != 0:
-    #    print("❌ Error: Height must be between 256-2048 and divisible by 64")
-    #    return False
-    
     if args.guidance_scale < 1.0 or args.guidance_scale > 20.0:
         print("❌ Error: Guidance scale must be between 1.0 and 20.0")
         return False
@@ -143,6 +165,14 @@ def validate_arguments(args: argparse.Namespace) -> bool:
     if args.num_inference_steps < 10 or args.num_inference_steps > 150:
         print("❌ Error: Inference steps must be between 10 and 150")
         return False
+
+    if args.adaptive:
+        if args.threshold is not None and args.threshold <= 0:
+            print("❌ Error: --threshold must be > 0")
+            return False
+        if args.target_frames_per_segment is not None and args.target_frames_per_segment < 2:
+            print("❌ Error: --target-frames-per-segment must be >= 2")
+            return False
     
     return True
 
@@ -160,15 +190,12 @@ def send_async_request(args: argparse.Namespace) -> bool:
         print(f"📝 Prompts: {args.prompts}")
         print(f"📁 Output directory: {args.output_dir}")
         print(f"🎯 Model: {args.model}")
-        print(f"📊 Parameters: {args.batch_size} steps × {len(args.prompts)} segments = {args.batch_size * len(args.prompts)} total frames")
         print(f"🖼️ Resolution: {args.width}×{args.height}")
         
         if args.seed:
             print(f"🎲 Seed: {args.seed}")
         if args.latent_cookie:
             print(f"🍪 Latent cookie: {args.latent_cookie}")
-        
-        print(f"\n⏳ Sending async multi-prompt request...")
         
         # Prepare generation parameters
         generation_kwargs = {
@@ -186,18 +213,37 @@ def send_async_request(args: argparse.Namespace) -> bool:
         if args.latent_cookie is not None:
             generation_kwargs["latent_cookie"] = args.latent_cookie
         
-        # Send the async request
-        job_id = generator.async_multi_prompt_generation(
-            prompts=args.prompts,
-            output_dir=args.output_dir,
-            batch_size=args.batch_size,
-            **generation_kwargs
-        )
+        if args.adaptive:
+            print(f"📊 Adaptive mode enabled: base={args.batch_size}, metric={args.metric}, threshold={args.threshold}, target_frames={args.target_frames_per_segment}")
+            print(f"\n⏳ Sending adaptive async multi-prompt request...")
+            job_id = generator.async_adaptive_multi_prompt_generation(
+                prompts=args.prompts,
+                output_dir=args.output_dir,
+                base_batch_size=args.batch_size,
+                metric=args.metric,
+                threshold=args.threshold,
+                target_frames_per_segment=args.target_frames_per_segment,
+                preview_size=args.preview_size,
+                max_depth=args.max_depth,
+                save_intermediate=args.save_intermediate,
+                max_frames_total=args.max_frames_total,
+                **generation_kwargs
+            )
+        else:
+            print(f"📊 Parameters: {args.batch_size} steps × {len(args.prompts)} segments = {args.batch_size * len(args.prompts)} total frames")
+            print(f"\n⏳ Sending async multi-prompt request...")
+            job_id = generator.async_multi_prompt_generation(
+                prompts=args.prompts,
+                output_dir=args.output_dir,
+                batch_size=args.batch_size,
+                **generation_kwargs
+            )
         
         if job_id:
             print(f"✅ Request accepted successfully!")
             print(f"� Job ID: {job_id}")
-            print(f"📊 Estimated total frames: {args.batch_size * len(args.prompts)}")
+            if not args.adaptive:
+                print(f"📊 Estimated total frames: {args.batch_size * len(args.prompts)}")
             print(f"\n🔄 The server is now generating images in the background.")
             print(f"📁 Monitor progress by checking files in: {args.output_dir}")
             print(f"🖼️ Images will be saved as: frame_000000.png, frame_000001.png, etc.")
