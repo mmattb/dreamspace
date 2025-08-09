@@ -1230,3 +1230,93 @@ def create_app(backend_type: str = "sd15_server",
             raise HTTPException(status_code=500, detail=str(e))
 
     return app
+
+def run_server(backend_type: str = "kandinsky_local",
+               host: str = "localhost",
+               port: int = 8000,
+               workers: int = 1,
+               enable_auth: bool = False,
+               api_key: Optional[str] = None,
+               gpus: Optional[str] = None,
+               disable_safety_checker: bool = False):
+    """Run the image generation server.
+    
+    Args:
+        backend_type: Type of backend to use
+        host: Host to bind to
+        port: Port to bind to
+        workers: Number of worker processes
+        enable_auth: Whether to enable authentication
+        api_key: API key for authentication
+        gpus: GPU selection - 'auto', '0', '1', '0,1', or specific GPU IDs
+        disable_safety_checker: Disable NSFW safety checker for SD 1.5
+    """
+    # Store configuration for backend creation
+    app_state["gpu_selection"] = gpus
+    app_state["disable_safety_checker"] = disable_safety_checker
+    
+    app = create_app(backend_type, enable_auth, api_key)
+    
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        workers=workers,
+        log_level="info"
+    )
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+    
+    parser = argparse.ArgumentParser(description="Dreamspace Co-Pilot API Server")
+    parser.add_argument("--backend", default="kandinsky21_server", 
+                       choices=[
+                           "kandinsky_local", "kandinsky21_server",
+                           "sd_local", "sd15_server", "sd21_server",
+                           "remote"
+                       ],
+                       help="Backend type to use")
+    parser.add_argument("--host", default="localhost", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--workers", type=int, default=1, help="Number of workers")
+    parser.add_argument("--auth", action="store_true", help="Enable authentication")
+    parser.add_argument("--api-key", help="API key for authentication")
+    
+    # GPU selection arguments
+    parser.add_argument("--gpus", type=str, default="auto",
+                       help="GPU selection: 'auto' (use all), '0' (first GPU), '1' (second GPU), '0,1' (both GPUs), or specific GPU IDs")
+    parser.add_argument("--gpu-memory-fraction", type=float, default=0.9,
+                       help="Fraction of GPU memory to use (0.1-1.0)")
+    
+    # Safety checker arguments
+    parser.add_argument("--disable-safety-checker", action="store_true",
+                       help="Disable NSFW safety checker for SD 1.5 (fixes false positives)")
+    
+    args = parser.parse_args()
+    
+    # Set GPU environment based on selection
+    if args.gpus != "auto":
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+        print(f"🎯 GPU Selection: Using GPU(s) {args.gpus}")
+    else:
+        print("🎯 GPU Selection: Auto (using all available GPUs)")
+    
+    print(f"🚀 Starting server with backend: {args.backend}")
+    print(f"🌐 Binding to: {args.host}:{args.port}")
+    if args.gpus != "auto":
+        print(f"🎮 GPU Configuration: {args.gpus} (memory fraction: {args.gpu_memory_fraction})")
+    if args.disable_safety_checker:
+        print("🚫 NSFW safety checker disabled (fixes false positives)")
+    
+    run_server(
+        backend_type=args.backend,
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        enable_auth=args.auth,
+        api_key=args.api_key,
+        gpus=args.gpus,
+        disable_safety_checker=args.disable_safety_checker
+    )
