@@ -584,6 +584,79 @@ class AnimatedRemoteImgGen:
                 print(f"❌ Async multi-prompt request error [{request_id[:8]}]: {e}")
             raise
 
+    def async_adaptive_multi_prompt_generation(self, prompts: List[str], output_dir: str,
+                                               base_batch_size: int = 100,
+                                               metric: str = 'mse',
+                                               threshold: Optional[float] = None,
+                                               target_frames_per_segment: Optional[int] = None,
+                                               preview_size: int = 256,
+                                               max_depth: int = 5,
+                                               save_intermediate: bool = False,
+                                               max_frames_total: Optional[int] = None,
+                                               request_id: str = None,
+                                               **kwargs) -> str:
+        """Submit an adaptive async multi-prompt request to the server."""
+        if request_id is None:
+            request_id = str(time.time())
+        self.current_request_id = request_id
+        self.cancel_current_request = False
+
+        request_data = {
+            'prompts': prompts,
+            'output_dir': output_dir,
+            'model': self.model,
+            'base_batch_size': base_batch_size,
+            'width': kwargs.get('width', 512),
+            'height': kwargs.get('height', 512),
+            'num_inference_steps': kwargs.get('num_inference_steps', 20),
+            'guidance_scale': kwargs.get('guidance_scale', 7.5),
+            'seed': kwargs.get('seed', random.randint(0, 2**32 - 1)),
+            'latent_cookie': kwargs.get('latent_cookie', None),
+            'metric': metric,
+            'threshold': threshold,
+            'target_frames_per_segment': target_frames_per_segment,
+            'preview_size': preview_size,
+            'max_depth': max_depth,
+            'save_intermediate': save_intermediate,
+            'max_frames_total': max_frames_total,
+        }
+
+        print(f"🎬 Submitting adaptive async multi-prompt request [{request_id[:8]}]:")
+        print(f"   Prompts: {len(prompts)} ({', '.join(p[:20] + '...' for p in prompts[:3])})")
+        print(f"   Output: {output_dir}")
+        print(f"   Base batch size: {base_batch_size} | metric={metric} | threshold={threshold} | target_frames={target_frames_per_segment}")
+
+        try:
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled before starting")
+                return None
+
+            print("📡 Sending adaptive async multi-prompt request to server...")
+            response = requests.post(
+                f"{self.server_url}/generate_async_adaptive_multi_prompt",
+                json=request_data,
+                timeout=30
+            )
+
+            if self.cancel_current_request or self.current_request_id != request_id:
+                print(f"❌ Request {request_id[:8]} cancelled after server response")
+                return None
+
+            if response.status_code != 200:
+                raise Exception(f"Adaptive async multi-prompt request failed: {response.status_code} - {response.text}")
+
+            result = response.json()
+            job_id = result.get('job_id')
+
+            print("✅ Adaptive async multi-prompt request submitted successfully")
+            print(f"   Job ID: {job_id}")
+            print(f"   Status: {result.get('status', 'unknown')}")
+            return job_id
+        except Exception as e:
+            if not (self.cancel_current_request or self.current_request_id != request_id):
+                print(f"❌ Adaptive async multi-prompt request error [{request_id[:8]}]: {e}")
+            raise
+
     def get_status(self) -> Dict[str, Any]:
         """Get current status information."""
         return {
