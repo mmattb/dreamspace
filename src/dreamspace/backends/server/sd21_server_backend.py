@@ -2,6 +2,7 @@
 
 import time
 
+from diffusers import AutoPipelineForText2Image
 import torch
 from typing import Dict, Any, Optional
 from PIL import Image
@@ -81,7 +82,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         sub_batch_size = min(max_parallel_images, total_batch_size)
         
         # Apply more conservative practical limits for SD 2.1
-        sub_batch_size = max(1, min(sub_batch_size, 8))  # Never more than 8 per sub-batch for SD 2.1
+        sub_batch_size = max(1, min(sub_batch_size, 34))  # Never more than 8 per sub-batch for SD 2.1
         
         print(f"📊 SD 2.1 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):")
         print(f"   Estimated {memory_per_image_gb:.2f}GB per image (SD 2.1 is memory-intensive)")
@@ -91,7 +92,6 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
     
     def _load_pipelines(self):
         """Load the diffusion pipelines using AutoPipeline."""
-        from diffusers import AutoPipelineForText2Image
         
         print(f"🔮 Loading Stable Diffusion 2.1 from {self.model_id} on {self.device}...")
         
