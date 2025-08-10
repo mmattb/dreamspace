@@ -604,6 +604,7 @@ def _async_adaptive_multi_prompt_worker(job_id: str, request: AsyncAdaptiveMulti
                 while depth < max_depth:
                     mids = []
                     for i, dv in enumerate(dists):
+                        print("ddddd", dv, threshold)
                         if dv > threshold:
                             mids.append((alphas[i] + alphas[i+1]) / 2.0)
                     mids = sorted(set(round(m,6) for m in mids))
