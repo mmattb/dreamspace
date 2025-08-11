@@ -597,39 +597,80 @@ def _async_adaptive_multi_prompt_worker(job_id: str, request: AsyncAdaptiveMulti
                 final_alphas = _importance_resample(alphas, preview_imgs, target_K, metric_name)
                 final_alphas = sorted(set(round(a,6) for a in final_alphas))
             elif threshold is not None:
+                # Arc-length based resampling to achieve ~constant perceptual motion.
+                # Compute pairwise distances on the preview set, then resample to K ≈ total_dist/threshold.
                 def pair_dists(imgs):
                     return [_compute_metric(imgs[i], imgs[i+1], metric_name) for i in range(len(imgs)-1)]
                 dists = pair_dists(preview_imgs)
-                depth = 0
-                while depth < max_depth:
-                    mids = []
-                    for i, dv in enumerate(dists):
-                        print("ddddd", dv, threshold)
-                        if dv > threshold:
-                            mids.append((alphas[i] + alphas[i+1]) / 2.0)
-                    mids = sorted(set(round(m,6) for m in mids))
-                    if not mids:
-                        break
-                    mid_imgs = render_alphas(p1, p2, mids, preview_size, preview_size)
-                    # merge
-                    new_a, new_i = [], []
-                    m_idx = 0
-                    for i in range(len(preview_imgs)-1):
-                        new_a.append(alphas[i]); new_i.append(preview_imgs[i])
-                        mid_val = (alphas[i] + alphas[i+1]) / 2.0
-                        while m_idx < len(mids) and abs(mids[m_idx] - mid_val) <= 1e-6:
-                            new_a.append(mids[m_idx]); new_i.append(mid_imgs[m_idx]); m_idx += 1
-                    new_a.append(alphas[-1]); new_i.append(preview_imgs[-1])
-                    alphas, preview_imgs = new_a, new_i
-                    dists = pair_dists(preview_imgs)
-                    depth += 1
-                    print(f"  🧪 [Job {job_id[:8]}] Refinement round {depth}: frames={len(alphas)} (violations={sum(1 for x in dists if x>threshold)})")
-                    if request.max_frames_total is not None and (total_frames_saved + len(alphas)) > int(request.max_frames_total):
-                        print(f"  ⛔ [Job {job_id[:8]}] Max frames total reached during refinement")
-                        break
-                final_alphas = alphas
+                total_dist = sum(dists) if dists else 0.0
+                # If essentially no motion, just keep endpoints to prune duplicates
+                if total_dist <= 1e-9:
+                    final_alphas = [alphas[0], alphas[-1]] if len(alphas) > 1 else [alphas[0]]
+                else:
+                    # Choose K so that expected per-frame motion ~ threshold
+                    import math
+                    est_K = max(2, int(math.ceil(total_dist / max(threshold, 1e-9))) + 1)
+                    # Honor global cap if provided
+                    if request.max_frames_total is not None:
+                        remaining = max(2, int(request.max_frames_total) - total_frames_saved)
+                        est_K = max(2, min(est_K, remaining))
+                    final_alphas = _importance_resample(alphas, preview_imgs, est_K, metric_name)
+                # Ensure uniqueness and ordering
+                final_alphas = sorted(set(round(a, 6) for a in final_alphas))
             else:
+                # Uniform mode: start with the base grid
                 final_alphas = alphas
+
+            # Second pass: proportional densification and pruning between anchors
+            # Goal: maintain near-constant perceptual step size and avoid repeated frames.
+            if len(final_alphas) >= 2:
+                # Compute preview images at anchor alphas (cheap) to estimate per-interval motion
+                anchor_preview = render_alphas(p1, p2, final_alphas, preview_size, preview_size)
+                def pair_dists(imgs):
+                    return [_compute_metric(imgs[i], imgs[i+1], metric_name) for i in range(len(imgs)-1)]
+                d2 = pair_dists(anchor_preview)
+                total2 = sum(d2) if d2 else 0.0
+                # Target per-frame motion
+                if threshold is not None and total2 > 0:
+                    target_step = max(threshold, 1e-9)
+                elif total2 > 0 and len(final_alphas) > 1:
+                    target_step = max(total2 / (len(final_alphas) - 1), 1e-9)
+                else:
+                    target_step = 1.0
+
+                densified = [final_alphas[0]]
+                # Respect global frame cap if present
+                def remaining_budget(current_len: int) -> Optional[int]:
+                    if request.max_frames_total is None:
+                        return None
+                    return max(0, int(request.max_frames_total) - (total_frames_saved + current_len))
+
+                for i in range(len(final_alphas) - 1):
+                    a0, a1 = final_alphas[i], final_alphas[i+1]
+                    motion = d2[i] if i < len(d2) else 0.0
+                    # Desired number of segments for this interval
+                    desired_segments = 1 if target_step <= 0 else max(1, int(round(motion / target_step)))
+                    # Cap to avoid explosion
+                    desired_segments = min(desired_segments, 64)
+                    # Ensure we don't exceed global cap
+                    rem = remaining_budget(len(densified))
+                    if rem is not None:
+                        # rem counts frames, segments = frames between + 1; translate conservative
+                        # Keep at least one segment to include the endpoint
+                        max_segments_for_interval = max(1, rem)  # we will add endpoint below
+                        desired_segments = min(desired_segments, max_segments_for_interval)
+                    # Insert evenly spaced points inside (a0,a1)
+                    for k in range(1, desired_segments):
+                        t = k / desired_segments
+                        densified.append(a0 + t * (a1 - a0))
+                    densified.append(a1)
+                # Deduplicate tiny deltas and clamp to [0,1]
+                cleaned = []
+                for a in densified:
+                    a = min(1.0, max(0.0, float(round(a, 6))))
+                    if not cleaned or abs(a - cleaned[-1]) > 1e-6:
+                        cleaned.append(a)
+                final_alphas = cleaned
 
             # Full-res render
             full_imgs = []
