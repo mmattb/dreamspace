@@ -676,7 +676,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Build negative embeddings for classifier-free guidance
         negative_embedding = self._extract_text_embeddings("")
         batch_negative_embeds = negative_embedding.repeat(batch_size, 1, 1)
-        batch_combined_embeds = torch.cat([batch_negative_embeds, batch_prompt_embeds], dim=0)
+        batch_combined_embeds = torch.cat(
+            [batch_negative_embeds, batch_prompt_embeds], dim=0
+        )
 
         # Prepare shared initial latent (same noise for all frames) with optional cookie cache
         if latent_cookie is not None:
@@ -717,20 +719,32 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 current = end - start
 
                 # Reset timesteps for each sub-batch (scheduler tracks internal state)
-                self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+                self.pipe.scheduler.set_timesteps(
+                    num_inference_steps, device=self.pipe.device
+                )
 
                 sub_prompt_embeds = batch_prompt_embeds[start:end]
                 sub_negative_embeds = negative_embedding.repeat(current, 1, 1)
-                sub_combined = torch.cat([sub_negative_embeds, sub_prompt_embeds], dim=0)
+                sub_combined = torch.cat(
+                    [sub_negative_embeds, sub_prompt_embeds], dim=0
+                )
 
                 latents = single_latent.repeat(current, 1, 1, 1)
                 for t in self.pipe.scheduler.timesteps:
                     latent_input = torch.cat([latents] * 2)
-                    latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-                    noise_pred = self.pipe.unet(latent_input, t, encoder_hidden_states=sub_combined).sample
+                    latent_input = self.pipe.scheduler.scale_model_input(
+                        latent_input, t
+                    )
+                    noise_pred = self.pipe.unet(
+                        latent_input, t, encoder_hidden_states=sub_combined
+                    ).sample
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-                    latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
+                    latents = self.pipe.scheduler.step(
+                        noise_pred, t, latents
+                    ).prev_sample
                     # Cleanup
                     del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
@@ -741,9 +755,13 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             for t in self.pipe.scheduler.timesteps:
                 latent_input = torch.cat([latents] * 2)
                 latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-                noise_pred = self.pipe.unet(latent_input, t, encoder_hidden_states=batch_combined_embeds).sample
+                noise_pred = self.pipe.unet(
+                    latent_input, t, encoder_hidden_states=batch_combined_embeds
+                ).sample
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                noise_pred = noise_pred_uncond + guidance_scale * (
+                    noise_pred_text - noise_pred_uncond
+                )
                 latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
                 # Cleanup
                 del latent_input, noise_pred, noise_pred_uncond, noise_pred_text

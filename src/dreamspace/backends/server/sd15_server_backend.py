@@ -1105,7 +1105,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         total_batch_size = batch_prompt_embeds.shape[0]
 
         if sub_batch_size is None:
-            sub_batch_size = self._calculate_sub_batch_size(total_batch_size, width, height)
+            sub_batch_size = self._calculate_sub_batch_size(
+                total_batch_size, width, height
+            )
 
         # Prepare negative embeddings once
         negative_embedding = self._extract_text_embeddings("")
@@ -1146,11 +1148,15 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
 
             # Reset timesteps to avoid scheduler internal state issues
             # The scheduler maintains internal state that gets confused with different batch sizes
-            self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+            self.pipe.scheduler.set_timesteps(
+                num_inference_steps, device=self.pipe.device
+            )
 
             sub_prompt_embeds = batch_prompt_embeds[start:end]
             batch_negative_embeds = negative_embedding.repeat(cur_bs, 1, 1)
-            batch_combined_embeds = torch.cat([batch_negative_embeds, sub_prompt_embeds])
+            batch_combined_embeds = torch.cat(
+                [batch_negative_embeds, sub_prompt_embeds]
+            )
 
             sub_latents = single_latent.repeat(cur_bs, 1, 1, 1)
 
@@ -1163,9 +1169,13 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
                 ).sample
 
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                noise_pred = noise_pred_uncond + guidance_scale * (
+                    noise_pred_text - noise_pred_uncond
+                )
 
-                sub_latents = self.pipe.scheduler.step(noise_pred, t, sub_latents).prev_sample
+                sub_latents = self.pipe.scheduler.step(
+                    noise_pred, t, sub_latents
+                ).prev_sample
 
                 del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
@@ -1187,7 +1197,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             decoded_chunks: List[torch.Tensor] = []
             for dstart in range(0, total_batch_size, decode_sub_batch):
                 dend = min(dstart + decode_sub_batch, total_batch_size)
-                decode_latents = final_latents_batch[dstart:dend] / (scale if scale != 0 else 1.0)
+                decode_latents = final_latents_batch[dstart:dend] / (
+                    scale if scale != 0 else 1.0
+                )
                 decoded = self.pipe.vae.decode(decode_latents).sample
                 decoded = (decoded / 2 + 0.5).clamp(0, 1)
                 decoded_chunks.append(decoded)
@@ -1198,7 +1210,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         else:
             for dstart in range(0, total_batch_size, decode_sub_batch):
                 dend = min(dstart + decode_sub_batch, total_batch_size)
-                decode_latents = final_latents_batch[dstart:dend] / (scale if scale != 0 else 1.0)
+                decode_latents = final_latents_batch[dstart:dend] / (
+                    scale if scale != 0 else 1.0
+                )
                 with torch.no_grad():
                     images = self.pipe.vae.decode(decode_latents).sample
                     images = (images / 2 + 0.5).clamp(0, 1)
@@ -1213,7 +1227,9 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
         print(f"🎨 Decoding completed in {decode_time:.3f}s")
 
         total_time = time.time() - total_start
-        print(f"✅ Sequence rendering complete in {total_time:.3f}s for {total_batch_size} images")
+        print(
+            f"✅ Sequence rendering complete in {total_time:.3f}s for {total_batch_size} images"
+        )
 
         result: Dict[str, Any] = {
             "format": "torch_tensor" if output_format == "tensor" else "pil",
@@ -1224,9 +1240,19 @@ class StableDiffusion15ServerBackend(ImgGenBackend):
             result["alphas"] = alphas
         if output_format == "tensor":
             result["images"] = output_tensor
-            result["shape"] = tuple(output_tensor.shape) if output_tensor is not None else None
-            result["device"] = str(output_tensor.device) if output_tensor is not None else str(self.pipe.device)
-            result["dtype"] = str(output_tensor.dtype) if output_tensor is not None else str(getattr(self.pipe, "dtype", "unknown"))
+            result["shape"] = (
+                tuple(output_tensor.shape) if output_tensor is not None else None
+            )
+            result["device"] = (
+                str(output_tensor.device)
+                if output_tensor is not None
+                else str(self.pipe.device)
+            )
+            result["dtype"] = (
+                str(output_tensor.dtype)
+                if output_tensor is not None
+                else str(getattr(self.pipe, "dtype", "unknown"))
+            )
         else:
             result["images"] = pil_images
         return result

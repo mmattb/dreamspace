@@ -598,10 +598,14 @@ def _importance_resample(
     for d in pairwise_distances:
         cumulative_distances.append(cumulative_distances[-1] + d)
 
-    total_arc_length = cumulative_distances[-1] if cumulative_distances[-1] > 0 else 1e-6
+    total_arc_length = (
+        cumulative_distances[-1] if cumulative_distances[-1] > 0 else 1e-6
+    )
 
     # 3) Target equally spaced arc-length positions and corresponding alphas
-    target_arc_positions = [i * (total_arc_length / (target_k - 1)) for i in range(target_k)]
+    target_arc_positions = [
+        i * (total_arc_length / (target_k - 1)) for i in range(target_k)
+    ]
     resampled_alphas: List[float] = []
     segment_index = 0
 
@@ -626,8 +630,12 @@ def _importance_resample(
                 # No motion in this segment — snap to start alpha
                 resampled_alphas.append(alpha_start)
             else:
-                local_fraction = (target_distance - seg_start_cum) / (seg_end_cum - seg_start_cum)
-                resampled_alphas.append(alpha_start + local_fraction * (alpha_end - alpha_start))
+                local_fraction = (target_distance - seg_start_cum) / (
+                    seg_end_cum - seg_start_cum
+                )
+                resampled_alphas.append(
+                    alpha_start + local_fraction * (alpha_end - alpha_start)
+                )
 
     # Ensure original endpoints are preserved exactly
     resampled_alphas[0] = alphas[0]
@@ -664,10 +672,14 @@ def _adaptive_resample_alphas(
         if request.target_frames_per_segment
         else None
     )
-    motion_threshold = float(request.threshold) if request.threshold is not None else None
+    motion_threshold = (
+        float(request.threshold) if request.threshold is not None else None
+    )
 
     if target_frame_count:
-        resampled = _importance_resample(alphas, preview_imgs, target_frame_count, metric_name)
+        resampled = _importance_resample(
+            alphas, preview_imgs, target_frame_count, metric_name
+        )
         final_alphas = sorted(set(round(a, 6) for a in resampled))
     elif motion_threshold is not None:
         # Arc-length based resampling to achieve ~constant perceptual motion.
@@ -682,14 +694,22 @@ def _adaptive_resample_alphas(
             final_alphas = [alphas[0], alphas[-1]] if len(alphas) > 1 else [alphas[0]]
         else:
             # Estimate a frame count so that expected per-frame motion ≈ threshold
-            estimated_frame_count = max(2, int(math.ceil(total_motion / max(motion_threshold, 1e-9))) + 1)
+            estimated_frame_count = max(
+                2, int(math.ceil(total_motion / max(motion_threshold, 1e-9))) + 1
+            )
 
             # Honor global cap if provided
             if request.max_frames_total is not None:
-                remaining_budget = max(2, int(request.max_frames_total) - total_frames_saved)
-                estimated_frame_count = max(2, min(estimated_frame_count, remaining_budget))
+                remaining_budget = max(
+                    2, int(request.max_frames_total) - total_frames_saved
+                )
+                estimated_frame_count = max(
+                    2, min(estimated_frame_count, remaining_budget)
+                )
 
-            resampled = _importance_resample(alphas, preview_imgs, estimated_frame_count, metric_name)
+            resampled = _importance_resample(
+                alphas, preview_imgs, estimated_frame_count, metric_name
+            )
             final_alphas = sorted(set(round(a, 6) for a in resampled))
     else:
         # Uniform mode: preserve current grid
