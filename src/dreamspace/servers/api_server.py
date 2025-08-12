@@ -4,6 +4,7 @@ import asyncio
 import base64
 import time
 from io import BytesIO
+import math
 import random
 import shutil
 import traceback
@@ -570,320 +571,315 @@ def _compute_metric(img_a: Image.Image, img_b: Image.Image, metric: str) -> floa
 def _importance_resample(
     alphas: List[float], images: List[Image.Image], target_k: int, metric: str
 ) -> List[float]:
+    """Resample alphas so adjacent frames have roughly uniform perceptual motion.
+
+    Algorithm (arc-length reparameterization):
+    - Compute pairwise perceptual distances between consecutive preview images.
+    - Build cumulative arc length over the current alpha grid.
+    - Place `target_k` samples at equally spaced cumulative distances and
+      linearly interpolate their alpha positions within the corresponding segment.
+
+    Note: This produces exactly K frames distributed by perceptual motion.
+    It is not the iterative add/prune scheme; that approximation is handled by
+    threshold-mode + proportional densification elsewhere.
+    """
+    # Handle trivial cases quickly
     if target_k <= 2 or len(alphas) <= 2:
         return [alphas[0], alphas[-1]] if target_k == 2 else alphas[:target_k]
-    dists = []
+
+    # 1) Pairwise perceptual distances between consecutive preview frames
+    pairwise_distances: List[float] = []
     for i in range(len(images) - 1):
-        d = _compute_metric(images[i], images[i + 1], metric)
-        dists.append(max(0.0, d))
-    cum = [0.0]
-    for d in dists:
-        cum.append(cum[-1] + d)
-    total = cum[-1] if cum[-1] > 0 else 1e-6
-    target = [i * (total / (target_k - 1)) for i in range(target_k)]
-    out = []
-    j = 0
-    for t in target:
-        while j < len(cum) - 1 and cum[j + 1] < t:
-            j += 1
-        if j >= len(cum) - 1:
-            out.append(alphas[-1])
+        dist = _compute_metric(images[i], images[i + 1], metric)
+        pairwise_distances.append(max(0.0, dist))
+
+    # 2) Cumulative arc length along the sequence
+    cumulative_distances: List[float] = [0.0]
+    for d in pairwise_distances:
+        cumulative_distances.append(cumulative_distances[-1] + d)
+
+    total_arc_length = cumulative_distances[-1] if cumulative_distances[-1] > 0 else 1e-6
+
+    # 3) Target equally spaced arc-length positions and corresponding alphas
+    target_arc_positions = [i * (total_arc_length / (target_k - 1)) for i in range(target_k)]
+    resampled_alphas: List[float] = []
+    segment_index = 0
+
+    for target_distance in target_arc_positions:
+        # Find the segment [segment_index, segment_index+1] that spans this target arc distance
+        while (
+            segment_index < len(cumulative_distances) - 1
+            and cumulative_distances[segment_index + 1] < target_distance
+        ):
+            segment_index += 1
+
+        if segment_index >= len(cumulative_distances) - 1:
+            # Past the end — clamp to last alpha
+            resampled_alphas.append(alphas[-1])
         else:
-            c0, c1 = cum[j], cum[j + 1]
-            a0, a1 = alphas[j], alphas[j + 1]
-            if c1 == c0:
-                out.append(a0)
+            seg_start_cum = cumulative_distances[segment_index]
+            seg_end_cum = cumulative_distances[segment_index + 1]
+            alpha_start = alphas[segment_index]
+            alpha_end = alphas[segment_index + 1]
+
+            if seg_end_cum == seg_start_cum:
+                # No motion in this segment — snap to start alpha
+                resampled_alphas.append(alpha_start)
             else:
-                w = (t - c0) / (c1 - c0)
-                out.append(a0 + w * (a1 - a0))
-    out[0] = alphas[0]
-    out[-1] = alphas[-1]
-    # dedup tiny deltas
-    dedup = []
-    for a in out:
-        if not dedup or abs(a - dedup[-1]) > 1e-6:
-            dedup.append(a)
-    return dedup
+                local_fraction = (target_distance - seg_start_cum) / (seg_end_cum - seg_start_cum)
+                resampled_alphas.append(alpha_start + local_fraction * (alpha_end - alpha_start))
+
+    # Ensure original endpoints are preserved exactly
+    resampled_alphas[0] = alphas[0]
+    resampled_alphas[-1] = alphas[-1]
+
+    # Deduplicate tiny deltas (scheduler/float noise) and keep order
+    deduped_alphas: List[float] = []
+    for a in resampled_alphas:
+        if not deduped_alphas or abs(a - deduped_alphas[-1]) > 1e-6:
+            deduped_alphas.append(a)
+    return deduped_alphas
+
+
+def _adaptive_resample_alphas(
+    alphas: List[float],
+    preview_imgs: List,
+    request: AsyncAdaptiveMultiPromptRequest,
+    metric_name: str,
+    total_frames_saved: int,
+) -> List[float]:
+    """Choose alphas for a segment using either K-targeted or threshold-based strategy.
+
+    Behavior:
+    - target_frames_per_segment set: use arc-length resampling to return exactly K frames
+      (see _importance_resample).
+    - threshold set: estimate K ≈ total_motion / threshold + 1, optionally clamp to
+      global budget, then do a single arc-length resample. This is a one-shot
+      approximation of the iterative add/prune pseudocode. Additional proportional
+      densification happens later in _densify_alphas.
+    - neither set: keep the current uniform grid.
+    """
+    target_frame_count = (
+        int(request.target_frames_per_segment)
+        if request.target_frames_per_segment
+        else None
+    )
+    motion_threshold = float(request.threshold) if request.threshold is not None else None
+
+    if target_frame_count:
+        resampled = _importance_resample(alphas, preview_imgs, target_frame_count, metric_name)
+        final_alphas = sorted(set(round(a, 6) for a in resampled))
+    elif motion_threshold is not None:
+        # Arc-length based resampling to achieve ~constant perceptual motion.
+        pairwise_distances = [
+            _compute_metric(preview_imgs[i], preview_imgs[i + 1], metric_name)
+            for i in range(len(preview_imgs) - 1)
+        ]
+        total_motion = sum(pairwise_distances) if pairwise_distances else 0.0
+
+        if total_motion <= 1e-9:
+            # Essentially no motion: prune to endpoints
+            final_alphas = [alphas[0], alphas[-1]] if len(alphas) > 1 else [alphas[0]]
+        else:
+            # Estimate a frame count so that expected per-frame motion ≈ threshold
+            estimated_frame_count = max(2, int(math.ceil(total_motion / max(motion_threshold, 1e-9))) + 1)
+
+            # Honor global cap if provided
+            if request.max_frames_total is not None:
+                remaining_budget = max(2, int(request.max_frames_total) - total_frames_saved)
+                estimated_frame_count = max(2, min(estimated_frame_count, remaining_budget))
+
+            resampled = _importance_resample(alphas, preview_imgs, estimated_frame_count, metric_name)
+            final_alphas = sorted(set(round(a, 6) for a in resampled))
+    else:
+        # Uniform mode: preserve current grid
+        final_alphas = alphas
+
+    return final_alphas
+
+
+def _densify_alphas(
+    final_alphas: List[float],
+    p1: str,
+    p2: str,
+    render_alphas,
+    preview_size: int,
+    metric_name: str,
+    threshold: Optional[float],
+    request: AsyncAdaptiveMultiPromptRequest,
+    total_frames_saved: int,
+) -> List[float]:
+    """Apply proportional densification between anchor points."""
+    if len(final_alphas) < 2:
+        return final_alphas
+
+    # Compute preview images at anchor alphas (cheap) to estimate per-interval motion
+    anchor_preview = render_alphas(p1, p2, final_alphas, preview_size, preview_size)
+
+    def pair_dists(imgs):
+        return [
+            _compute_metric(imgs[i], imgs[i + 1], metric_name)
+            for i in range(len(imgs) - 1)
+        ]
+
+    d2 = pair_dists(anchor_preview)
+    total2 = sum(d2) if d2 else 0.0
+    # Target per-frame motion
+    if threshold is not None and total2 > 0:
+        target_step = max(threshold, 1e-9)
+    elif total2 > 0 and len(final_alphas) > 1:
+        target_step = max(total2 / (len(final_alphas) - 1), 1e-9)
+    else:
+        target_step = 1.0
+
+    densified = [final_alphas[0]]
+
+    # Respect global frame cap if present
+    def remaining_budget(current_len: int) -> Optional[int]:
+        if request.max_frames_total is None:
+            return None
+        return max(
+            0,
+            int(request.max_frames_total) - (total_frames_saved + current_len),
+        )
+
+    for i in range(len(final_alphas) - 1):
+        a0, a1 = final_alphas[i], final_alphas[i + 1]
+        motion = d2[i] if i < len(d2) else 0.0
+        # Desired number of segments for this interval
+        desired_segments = (
+            1 if target_step <= 0 else max(1, int(round(motion / target_step)))
+        )
+        # Cap to avoid explosion
+        desired_segments = min(desired_segments, 64)
+        # Ensure we don't exceed global cap
+        rem = remaining_budget(len(densified))
+        if rem is not None:
+            # rem counts frames, segments = frames between + 1; translate conservative
+            # Keep at least one segment to include the endpoint
+            max_segments_for_interval = max(1, rem)  # we will add endpoint below
+            desired_segments = min(desired_segments, max_segments_for_interval)
+        # Insert evenly spaced points inside (a0,a1)
+        for k in range(1, desired_segments):
+            t = k / desired_segments
+            densified.append(a0 + t * (a1 - a0))
+        densified.append(a1)
+
+    # Deduplicate tiny deltas and clamp to [0,1]
+    cleaned = []
+    for a in densified:
+        a = min(1.0, max(0.0, float(round(a, 6))))
+        if not cleaned or abs(a - cleaned[-1]) > 1e-6:
+            cleaned.append(a)
+
+    return cleaned
+
+
+def _process_adaptive_segment(
+    job_id: str,
+    seg_idx: int,
+    p1: str,
+    p2: str,
+    request: AsyncAdaptiveMultiPromptRequest,
+    render_alphas,
+    preview_dir: Optional[str],
+    metric_name: str,
+    base_n: int,
+    preview_size: int,
+    total_frames_saved: int,
+    prompt_pairs_len: int,
+) -> List:
+    """Process a single segment with adaptive interpolation."""
+    print(
+        f"🔄 [Job {job_id[:8]}] Segment {seg_idx+1}/{prompt_pairs_len}: '{p1[:30]}...' → '{p2[:30]}...'"
+    )
+
+    # Generate initial uniform grid
+    alphas = [i / (base_n - 1) for i in range(base_n)] if base_n > 1 else [0.0]
+    preview_imgs = render_alphas(p1, p2, alphas, preview_size, preview_size)
+
+    # Save intermediate previews if requested
+    if request.save_intermediate and preview_dir:
+        for idx, img in enumerate(preview_imgs):
+            img.save(
+                os.path.join(preview_dir, f"seg{seg_idx:02d}_pre_{idx:03d}.png"),
+                format="PNG",
+                optimize=True,
+            )
+
+    # Apply adaptive resampling
+    final_alphas = _adaptive_resample_alphas(
+        alphas, preview_imgs, request, metric_name, total_frames_saved
+    )
+
+    # Apply proportional densification
+    final_alphas = _densify_alphas(
+        final_alphas,
+        p1,
+        p2,
+        render_alphas,
+        preview_size,
+        metric_name,
+        float(request.threshold) if request.threshold is not None else None,
+        request,
+        total_frames_saved,
+    )
+
+    # Full-res render
+    full_imgs = []
+    CHUNK = 64
+    for s in range(0, len(final_alphas), CHUNK):
+        sub = final_alphas[s : s + CHUNK]
+        imgs = render_alphas(p1, p2, sub, request.width, request.height)
+        full_imgs.extend(imgs)
+
+    return full_imgs
 
 
 def _async_adaptive_multi_prompt_worker(
     job_id: str, request: AsyncAdaptiveMultiPromptRequest
 ):
-    import math
-
+    """Main worker function for adaptive multi-prompt generation."""
     try:
-        print(f"🌈 [Job {job_id[:8]}] Starting adaptive async multi-prompt generation")
-        print(f"📝 [Job {job_id[:8]}] Prompts: {request.prompts}")
-        print(f"📁 [Job {job_id[:8]}] Output directory: {request.output_dir}")
-        print(f"🎯 [Job {job_id[:8]}] Requested model: {request.model}")
-        mode_msg = (
-            "threshold=" + str(request.threshold)
-            if request.threshold is not None
-            else (
-                "target_frames=" + str(request.target_frames_per_segment)
-                if request.target_frames_per_segment
-                else "uniform"
-            )
-        )
-        print(
-            f"🧮 [Job {job_id[:8]}] Mode: {mode_msg} | base_batch_size={request.base_batch_size}"
-        )
         start_time = time.time()
 
-        img_gen = get_model_backend(request.model)
-        backend = img_gen.backend
-
-        os.makedirs(request.output_dir, exist_ok=True)
-        preview_dir = (
-            os.path.join(request.output_dir, "_preview")
-            if request.save_intermediate
-            else None
-        )
-        if preview_dir:
-            os.makedirs(preview_dir, exist_ok=True)
-
-        # Clear directory (keep _preview if saving intermediates)
-        for filename in os.listdir(request.output_dir):
-            if request.save_intermediate and filename == "_preview":
-                continue
-            path = os.path.join(request.output_dir, filename)
-            try:
-                if os.path.isfile(path) or os.path.islink(path):
-                    os.unlink(path)
-                elif os.path.isdir(path):
-                    shutil.rmtree(path)
-            except Exception as e:
-                print(f"⚠️ [Job {job_id[:8]}] Failed to delete {path}: {e}")
-
-        print(f"🗑️ [Job {job_id[:8]}] Cleared output directory")
-
-        gen_params = {
-            "guidance_scale": request.guidance_scale,
-            "num_inference_steps": request.num_inference_steps,
-            "output_format": "pil",
-            "latent_cookie": (
-                request.latent_cookie
-                if request.latent_cookie is not None
-                else random.randint(1, 1000000)
-            ),
-            "seed": (
-                request.seed
-                if request.seed is not None
-                else random.randint(0, 2**32 - 1)
-            ),
-        }
-        if request.latent_cookie is None:
-            print(
-                f"🍪 [Job {job_id[:8]}] Generated latent cookie {gen_params['latent_cookie']}"
-            )
-        else:
-            print(
-                f"🍪 [Job {job_id[:8]}] Using user-specified latent cookie {gen_params['latent_cookie']}"
-            )
-        if request.seed is None:
-            print(f"🎲 [Job {job_id[:8]}] Generated shared seed {gen_params['seed']}")
-        else:
-            print(
-                f"🎲 [Job {job_id[:8]}] Using user-specified seed {gen_params['seed']}"
-            )
-
-        prompts = request.prompts
-        num_prompts = len(prompts)
-        prompt_pairs = [
-            (prompts[i], prompts[(i + 1) % num_prompts]) for i in range(num_prompts)
-        ]
-        print(
-            f"🔄 [Job {job_id[:8]}] Created {len(prompt_pairs)} interpolation segments (including loop)"
+        # Setup job parameters and directories
+        backend, gen_params, prompt_pairs, preview_dir = _setup_adaptive_job(
+            job_id, request
         )
 
+        # Create render function with backend and parameters
+        render_alphas = _create_render_function(backend, gen_params)
+
+        # Extract algorithm parameters
         metric_name = (request.metric or "mse").lower()
         base_n = max(2, int(request.base_batch_size))
         preview_size = int(request.preview_size)
-        target_K = (
-            int(request.target_frames_per_segment)
-            if request.target_frames_per_segment
-            else None
-        )
-        threshold = float(request.threshold) if request.threshold is not None else None
-        max_depth = int(request.max_depth)
 
         total_frames_saved = 0
         global_frame_number = 0
 
-        def render_alphas(
-            prompt1, prompt2, alphas: List[float], width: int, height: int
-        ):
-            images = []
-            if hasattr(backend, "generate_interpolated_embeddings_at_alphas"):
-                res = backend.generate_interpolated_embeddings_at_alphas(
-                    prompt1=prompt1,
-                    prompt2=prompt2,
-                    alphas=alphas,
-                    width=width,
-                    height=height,
-                    **gen_params,
-                )
-                images = res.get("images", [])
-            else:
-                bs = max(2, len(alphas))
-                res = backend.generate_interpolated_embeddings(
-                    prompt1=prompt1,
-                    prompt2=prompt2,
-                    batch_size=bs,
-                    width=width,
-                    height=height,
-                    **gen_params,
-                )
-                cand = res.get("images", [])
-                if bs > 1 and cand:
-                    grid = [i / (bs - 1) for i in range(bs)]
-                    for a in alphas:
-                        idx = min(range(bs), key=lambda k: abs(grid[k] - a))
-                        images.append(cand[idx])
-                elif cand:
-                    images.append(cand[0])
-            return images
-
+        # Process each segment
         for seg_idx, (p1, p2) in enumerate(prompt_pairs):
             seg_start = time.time()
-            print(
-                f"🔄 [Job {job_id[:8]}] Segment {seg_idx+1}/{len(prompt_pairs)}: '{p1[:30]}...' → '{p2[:30]}...'"
+
+            # Process this segment with adaptive interpolation
+            full_imgs = _process_adaptive_segment(
+                job_id,
+                seg_idx,
+                p1,
+                p2,
+                request,
+                render_alphas,
+                preview_dir,
+                metric_name,
+                base_n,
+                preview_size,
+                total_frames_saved,
+                len(prompt_pairs),
             )
 
-            alphas = [i / (base_n - 1) for i in range(base_n)] if base_n > 1 else [0.0]
-            preview_imgs = render_alphas(p1, p2, alphas, preview_size, preview_size)
-            if request.save_intermediate and preview_dir:
-                for idx, img in enumerate(preview_imgs):
-                    img.save(
-                        os.path.join(
-                            preview_dir, f"seg{seg_idx:02d}_pre_{idx:03d}.png"
-                        ),
-                        format="PNG",
-                        optimize=True,
-                    )
-
-            if target_K:
-                final_alphas = _importance_resample(
-                    alphas, preview_imgs, target_K, metric_name
-                )
-                final_alphas = sorted(set(round(a, 6) for a in final_alphas))
-            elif threshold is not None:
-                # Arc-length based resampling to achieve ~constant perceptual motion.
-                # Compute pairwise distances on the preview set, then resample to K ≈ total_dist/threshold.
-                def pair_dists(imgs):
-                    return [
-                        _compute_metric(imgs[i], imgs[i + 1], metric_name)
-                        for i in range(len(imgs) - 1)
-                    ]
-
-                dists = pair_dists(preview_imgs)
-                total_dist = sum(dists) if dists else 0.0
-                # If essentially no motion, just keep endpoints to prune duplicates
-                if total_dist <= 1e-9:
-                    final_alphas = (
-                        [alphas[0], alphas[-1]] if len(alphas) > 1 else [alphas[0]]
-                    )
-                else:
-                    # Choose K so that expected per-frame motion ~ threshold
-                    import math
-
-                    est_K = max(
-                        2, int(math.ceil(total_dist / max(threshold, 1e-9))) + 1
-                    )
-                    # Honor global cap if provided
-                    if request.max_frames_total is not None:
-                        remaining = max(
-                            2, int(request.max_frames_total) - total_frames_saved
-                        )
-                        est_K = max(2, min(est_K, remaining))
-                    final_alphas = _importance_resample(
-                        alphas, preview_imgs, est_K, metric_name
-                    )
-                # Ensure uniqueness and ordering
-                final_alphas = sorted(set(round(a, 6) for a in final_alphas))
-            else:
-                # Uniform mode: start with the base grid
-                final_alphas = alphas
-
-            # Second pass: proportional densification and pruning between anchors
-            # Goal: maintain near-constant perceptual step size and avoid repeated frames.
-            if len(final_alphas) >= 2:
-                # Compute preview images at anchor alphas (cheap) to estimate per-interval motion
-                anchor_preview = render_alphas(
-                    p1, p2, final_alphas, preview_size, preview_size
-                )
-
-                def pair_dists(imgs):
-                    return [
-                        _compute_metric(imgs[i], imgs[i + 1], metric_name)
-                        for i in range(len(imgs) - 1)
-                    ]
-
-                d2 = pair_dists(anchor_preview)
-                total2 = sum(d2) if d2 else 0.0
-                # Target per-frame motion
-                if threshold is not None and total2 > 0:
-                    target_step = max(threshold, 1e-9)
-                elif total2 > 0 and len(final_alphas) > 1:
-                    target_step = max(total2 / (len(final_alphas) - 1), 1e-9)
-                else:
-                    target_step = 1.0
-
-                densified = [final_alphas[0]]
-
-                # Respect global frame cap if present
-                def remaining_budget(current_len: int) -> Optional[int]:
-                    if request.max_frames_total is None:
-                        return None
-                    return max(
-                        0,
-                        int(request.max_frames_total)
-                        - (total_frames_saved + current_len),
-                    )
-
-                for i in range(len(final_alphas) - 1):
-                    a0, a1 = final_alphas[i], final_alphas[i + 1]
-                    motion = d2[i] if i < len(d2) else 0.0
-                    # Desired number of segments for this interval
-                    desired_segments = (
-                        1
-                        if target_step <= 0
-                        else max(1, int(round(motion / target_step)))
-                    )
-                    # Cap to avoid explosion
-                    desired_segments = min(desired_segments, 64)
-                    # Ensure we don't exceed global cap
-                    rem = remaining_budget(len(densified))
-                    if rem is not None:
-                        # rem counts frames, segments = frames between + 1; translate conservative
-                        # Keep at least one segment to include the endpoint
-                        max_segments_for_interval = max(
-                            1, rem
-                        )  # we will add endpoint below
-                        desired_segments = min(
-                            desired_segments, max_segments_for_interval
-                        )
-                    # Insert evenly spaced points inside (a0,a1)
-                    for k in range(1, desired_segments):
-                        t = k / desired_segments
-                        densified.append(a0 + t * (a1 - a0))
-                    densified.append(a1)
-                # Deduplicate tiny deltas and clamp to [0,1]
-                cleaned = []
-                for a in densified:
-                    a = min(1.0, max(0.0, float(round(a, 6))))
-                    if not cleaned or abs(a - cleaned[-1]) > 1e-6:
-                        cleaned.append(a)
-                final_alphas = cleaned
-
-            # Full-res render
-            full_imgs = []
-            CHUNK = 64
-            for s in range(0, len(final_alphas), CHUNK):
-                sub = final_alphas[s : s + CHUNK]
-                imgs = render_alphas(p1, p2, sub, request.width, request.height)
-                full_imgs.extend(imgs)
-
+            # Save frames to disk
             for frame in full_imgs:
                 filename = f"frame_{global_frame_number:06d}.png"
                 frame.save(
