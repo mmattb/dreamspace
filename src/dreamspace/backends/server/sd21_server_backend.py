@@ -733,6 +733,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
                 "embeddings": batch_prompt_embeds,
             }
 
+    @no_grad_method
     def generate_interpolated_embeddings_at_alphas(
         self,
         prompt1: str,
@@ -759,7 +760,6 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         print(
             f"🎯 Starting precise interpolated embedding generation: '{prompt1}' → '{prompt2}' at {batch_size} specific alphas"
         )
-        print(f"🔢 Alpha values: {alphas}")
 
         # Setup phase
         setup_start = time.time()
@@ -794,7 +794,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
 
         # Create interpolated embeddings at exact alphas
         interpolated_embeddings = []
-        print(f"🔍 Creating {batch_size} interpolation steps at exact alphas: {alphas}")
+        print(f"🔍 Creating {batch_size} interpolation steps at exact alphas")
 
         for alpha in alphas:
             # Ensure alpha is in valid range
