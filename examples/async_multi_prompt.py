@@ -121,8 +121,8 @@ def parse_arguments() -> argparse.Namespace:
         help="Use adaptive interpolation density (server decides frames per segment based on perceptual changes)"
     )
     parser.add_argument(
-        "--metric", type=str, default="mse", choices=["lpips", "ssim", "mse"],
-        help="Perceptual metric for adaptive mode (default: mse)"
+        "--metric", type=str, default="lpips", choices=["lpips", "ssim", "mse"],
+        help="Perceptual metric for adaptive mode (default: lpips)"
     )
     parser.add_argument(
         "--threshold", type=float,
