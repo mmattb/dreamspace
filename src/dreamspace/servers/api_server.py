@@ -795,6 +795,125 @@ def _densify_alphas(
     return cleaned
 
 
+def _refine_by_threshold_greedy_split(
+    alphas: List[float],
+    preview_imgs: List[Image.Image],
+    p1: str,
+    p2: str,
+    render_alphas,
+    preview_size: int,
+    metric_name: str,
+    threshold: float,
+    max_depth: int,
+    request: AsyncAdaptiveMultiPromptRequest,
+    total_frames_saved: int,
+):
+    """Greedy interval splitting until max adjacent motion <= threshold or limits hit.
+
+    Returns updated (alphas, preview_imgs). Adds at most `max_depth` frames to bound cost.
+    Honors global max_frames_total if provided.
+    """
+    if len(alphas) < 2 or threshold is None:
+        return alphas, preview_imgs
+
+    # Cap on total insertions based on global budget
+    if request.max_frames_total is not None:
+        remaining = max(
+            0, int(request.max_frames_total) - (total_frames_saved + len(alphas))
+        )
+        max_insertions = remaining
+    else:
+        max_insertions = max_depth  # conservative default
+
+    insertions = 0
+    rounds = 0
+
+    def pairwise_dist(imgs: List[Image.Image]) -> List[float]:
+        return [
+            _compute_metric(imgs[i], imgs[i + 1], metric_name)
+            for i in range(len(imgs) - 1)
+        ]
+
+    while rounds < max_depth and insertions < max_insertions:
+        if len(preview_imgs) < 2:
+            break
+        dists = pairwise_dist(preview_imgs)
+        if not dists:
+            break
+        max_idx = max(range(len(dists)), key=lambda i: dists[i])
+        max_val = dists[max_idx]
+        if max_val <= threshold + 1e-9:
+            break
+
+        # Split the worst interval at its midpoint in alpha space
+        a0, a1 = alphas[max_idx], alphas[max_idx + 1]
+        mid = float(round((a0 + a1) * 0.5, 6))
+        if mid <= a0 + 1e-6 or mid >= a1 - 1e-6:
+            # Degenerate interval due to rounding; stop
+            break
+
+        # Render the mid preview cheaply
+        try:
+            mid_img_list = render_alphas(p1, p2, [mid], preview_size, preview_size)
+            if not mid_img_list:
+                break
+            mid_img = mid_img_list[0]
+        except Exception:
+            break
+
+        # Insert into sequences
+        alphas = alphas[: max_idx + 1] + [mid] + alphas[max_idx + 1 :]
+        preview_imgs = (
+            preview_imgs[: max_idx + 1] + [mid_img] + preview_imgs[max_idx + 1 :]
+        )
+        insertions += 1
+        rounds += 1
+
+    return alphas, preview_imgs
+
+
+def _prune_small_motion(
+    alphas: List[float],
+    preview_imgs: List[Image.Image],
+    metric_name: str,
+    prune_threshold: float,
+):
+    """Prune near-duplicate frames so each kept step has at least prune_threshold motion.
+
+    Always keeps the first and last frames.
+    Returns (kept_alphas, kept_preview_imgs).
+    """
+    n = len(alphas)
+    if n <= 2:
+        return alphas, preview_imgs
+
+    kept_a = [alphas[0]]
+    kept_i = [preview_imgs[0]]
+    last_kept_img = preview_imgs[0]
+
+    for i in range(1, n - 1):
+        d = _compute_metric(last_kept_img, preview_imgs[i], metric_name)
+        if d >= max(prune_threshold, 0.0):
+            kept_a.append(alphas[i])
+            kept_i.append(preview_imgs[i])
+            last_kept_img = preview_imgs[i]
+
+    # Always include the last endpoint
+    kept_a.append(alphas[-1])
+    kept_i.append(preview_imgs[-1])
+
+    # Clean tiny alpha jitter
+    cleaned_a: List[float] = []
+    cleaned_i: List[Image.Image] = []
+    for a, img in zip(kept_a, kept_i):
+        a = float(round(min(1.0, max(0.0, a)), 6))
+        if not cleaned_a or abs(a - cleaned_a[-1]) > 1e-6:
+            cleaned_a.append(a)
+            cleaned_i.append(img)
+
+    return cleaned_a, cleaned_i
+
+
 def _process_adaptive_segment(
     job_id: str,
     seg_idx: int,
@@ -827,23 +946,45 @@ def _process_adaptive_segment(
                 optimize=True,
             )
 
-    # Apply adaptive resampling
-    final_alphas = _adaptive_resample_alphas(
-        alphas, preview_imgs, request, metric_name, total_frames_saved
-    )
-
-    # Apply proportional densification
-    final_alphas = _densify_alphas(
-        final_alphas,
-        p1,
-        p2,
-        render_alphas,
-        preview_size,
-        metric_name,
-        float(request.threshold) if request.threshold is not None else None,
-        request,
-        total_frames_saved,
-    )
+    # Threshold mode: iterative split + prune
+    if request.threshold is not None:
+        thr = float(request.threshold)
+        alphas, preview_imgs = _refine_by_threshold_greedy_split(
+            alphas,
+            preview_imgs,
+            p1,
+            p2,
+            render_alphas,
+            preview_size,
+            metric_name,
+            thr,
+            int(request.max_depth),
+            request,
+            total_frames_saved,
+        )
+        # Prune with hysteresis (lower than split threshold to avoid oscillation)
+        prune_thr = max(thr * 0.4, 0.0)
+        final_alphas, _ = _prune_small_motion(
+            alphas, preview_imgs, metric_name, prune_thr
+        )
+    else:
+        # Apply adaptive resampling (K-targeted or single-pass threshold approximation)
+        final_alphas = _adaptive_resample_alphas(
+            alphas, preview_imgs, request, metric_name, total_frames_saved
+        )
+        # Apply proportional densification only when not using strict K or threshold
+        if not request.target_frames_per_segment and request.threshold is None:
+            final_alphas = _densify_alphas(
+                final_alphas,
+                p1,
+                p2,
+                render_alphas,
+                preview_size,
+                metric_name,
+                None,
+                request,
+                total_frames_saved,
+            )
 
     # Full-res render
     full_imgs = []
@@ -863,13 +1004,99 @@ def _async_adaptive_multi_prompt_worker(
     try:
         start_time = time.time()
 
-        # Setup job parameters and directories
-        backend, gen_params, prompt_pairs, preview_dir = _setup_adaptive_job(
-            job_id, request
+        # Inline setup (replaces _setup_adaptive_job)
+        img_gen = get_model_backend(request.model)
+        backend = img_gen.backend
+
+        # Prepare output directory
+        os.makedirs(request.output_dir, exist_ok=True)
+        # Clear directory contents
+        for filename in os.listdir(request.output_dir):
+            file_path = os.path.join(request.output_dir, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                print(f"⚠️ [Job {job_id[:8]}] Failed to delete {file_path}: {e}")
+        print(f"🗑️ [Job {job_id[:8]}] Cleared output directory")
+
+        # Preview dir for debugging
+        preview_dir = None
+        if request.save_intermediate:
+            preview_dir = os.path.join(request.output_dir, "_preview")
+            os.makedirs(preview_dir, exist_ok=True)
+
+        # Generation params shared
+        gen_params = {
+            "guidance_scale": request.guidance_scale,
+            "num_inference_steps": request.num_inference_steps,
+            "output_format": "pil",
+        }
+
+        # Shared latent cookie and seed
+        if request.latent_cookie is not None:
+            latent_cookie = request.latent_cookie
+            print(
+                f"🍪 [Job {job_id[:8]}] Using user-specified latent cookie {latent_cookie}"
+            )
+        else:
+            latent_cookie = random.randint(1, 1_000_000)
+            print(f"🍪 [Job {job_id[:8]}] Generated latent cookie {latent_cookie}")
+        if request.seed is not None:
+            shared_seed = request.seed
+            print(f"🎲 [Job {job_id[:8]}] Using user-specified seed {shared_seed}")
+        else:
+            shared_seed = random.randint(0, 2**32 - 1)
+            print(f"🎲 [Job {job_id[:8]}] Generated shared seed {shared_seed}")
+        gen_params["latent_cookie"] = latent_cookie
+        gen_params["seed"] = shared_seed
+
+        # Build prompt pairs including loop back to start
+        prompts = request.prompts
+        num_prompts = len(prompts)
+        prompt_pairs = [
+            (prompts[i], prompts[(i + 1) % num_prompts]) for i in range(num_prompts)
+        ]
+        print(
+            f"🔄 [Job {job_id[:8]}] Created {len(prompt_pairs)} interpolation segments (including loop)"
         )
 
-        # Create render function with backend and parameters
-        render_alphas = _create_render_function(backend, gen_params)
+        # Render function (replaces _create_render_function)
+        def render_alphas(
+            p1: str, p2: str, alphas: List[float], width: int, height: int
+        ):
+            kwargs = {
+                "prompt1": p1,
+                "prompt2": p2,
+                "output_format": "pil",
+                "guidance_scale": gen_params["guidance_scale"],
+                "num_inference_steps": gen_params["num_inference_steps"],
+                "width": width,
+                "height": height,
+                "seed": gen_params["seed"],
+                "latent_cookie": gen_params["latent_cookie"],
+            }
+            if hasattr(backend, "generate_interpolated_embeddings_at_alphas"):
+                res = backend.generate_interpolated_embeddings_at_alphas(
+                    alphas=alphas, **kwargs
+                )
+            else:
+                # Fallback: approximate via uniform batch
+                res = backend.generate_interpolated_embeddings(
+                    batch_size=max(2, len(alphas)),
+                    **{
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in ["prompt1", "prompt2", "width", "height"]
+                    },
+                    prompt1=p1,
+                    prompt2=p2,
+                    width=width,
+                    height=height,
+                )
+            return res.get("images", [])
 
         # Extract algorithm parameters
         metric_name = (request.metric or "mse").lower()
