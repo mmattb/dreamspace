@@ -823,7 +823,7 @@ def _refine_by_threshold_greedy_split(
         max_insertions = remaining
     else:
         max_insertions = (
-            max_depth * 10
+            max_depth * 500
         )  # more generous default for multi-split approach
 
     insertions = 0
@@ -843,7 +843,7 @@ def _refine_by_threshold_greedy_split(
         # For distance = 2*threshold, add 1 subdivision
         # For distance = 4*threshold, add 3 subdivisions, etc.
         ratio = distance / threshold
-        return max(1, min(4, int(ratio)))  # Cap at 4 subdivisions per interval
+        return max(1, min(64, int(ratio)))  # Cap at 64 subdivisions per interval
 
     while rounds < max_depth and insertions < max_insertions:
         if len(preview_imgs) < 2:
@@ -866,8 +866,6 @@ def _refine_by_threshold_greedy_split(
         print(f"Round {rounds}: splitting {len(intervals_to_split)} intervals")
 
         # Process intervals from right to left to maintain indices
-        new_alphas = []
-        new_imgs = []
         intervals_to_split.sort(reverse=True)  # Process from highest index to lowest
 
         # Build new sequences by processing each original interval
@@ -884,9 +882,7 @@ def _refine_by_threshold_greedy_split(
             subdivision_alphas = []
             for j in range(1, num_subdivisions + 1):
                 mid_alpha = a0 + (a1 - a0) * j / (num_subdivisions + 1)
-                mid_alpha = float(round(mid_alpha, 6))
-                if mid_alpha > a0 + 1e-6 and mid_alpha < a1 - 1e-6:
-                    subdivision_alphas.append(mid_alpha)
+                subdivision_alphas.append(mid_alpha)
 
             if not subdivision_alphas:
                 continue
