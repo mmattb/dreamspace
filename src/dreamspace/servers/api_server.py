@@ -22,6 +22,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from PIL import Image
+from PIL import ImageChops as _ImageChops  # type: ignore
 import uvicorn
 import torch
 
@@ -553,8 +554,6 @@ def _compute_metric(img_a: Image.Image, img_b: Image.Image, metric: str) -> floa
             return float(1.0 - val)
         except Exception:
             metric = "mse"
-    # Fallback MSE (pure PIL, no numpy required)
-    from PIL import ImageChops as _ImageChops  # type: ignore
 
     a = img_a.convert("RGB")
     b = img_b.convert("RGB")
@@ -808,9 +807,9 @@ def _refine_by_threshold_greedy_split(
     request: AsyncAdaptiveMultiPromptRequest,
     total_frames_saved: int,
 ):
-    """Greedy interval splitting until max adjacent motion <= threshold or limits hit.
+    """Depth-based interval splitting: each round subdivides ALL intervals exceeding threshold.
 
-    Returns updated (alphas, preview_imgs). Adds at most `max_depth` frames to bound cost.
+    Returns updated (alphas, preview_imgs). Adds frames proportional to distance.
     Honors global max_frames_total if provided.
     """
     if len(alphas) < 2 or threshold is None:
@@ -823,7 +822,9 @@ def _refine_by_threshold_greedy_split(
         )
         max_insertions = remaining
     else:
-        max_insertions = max_depth  # conservative default
+        max_insertions = (
+            max_depth * 10
+        )  # more generous default for multi-split approach
 
     insertions = 0
     rounds = 0
@@ -834,39 +835,97 @@ def _refine_by_threshold_greedy_split(
             for i in range(len(imgs) - 1)
         ]
 
+    def compute_subdivisions(distance: float, threshold: float) -> int:
+        """Compute number of subdivisions based on how much distance exceeds threshold."""
+        if distance <= threshold:
+            return 0
+        # Linear scaling: more subdivisions for larger distances
+        # For distance = 2*threshold, add 1 subdivision
+        # For distance = 4*threshold, add 3 subdivisions, etc.
+        ratio = distance / threshold
+        return max(1, min(4, int(ratio)))  # Cap at 4 subdivisions per interval
+
     while rounds < max_depth and insertions < max_insertions:
         if len(preview_imgs) < 2:
             break
+
         dists = pairwise_dist(preview_imgs)
         if not dists:
             break
-        max_idx = max(range(len(dists)), key=lambda i: dists[i])
-        max_val = dists[max_idx]
-        if max_val <= threshold + 1e-9:
-            break
 
-        # Split the worst interval at its midpoint in alpha space
-        a0, a1 = alphas[max_idx], alphas[max_idx + 1]
-        mid = float(round((a0 + a1) * 0.5, 6))
-        if mid <= a0 + 1e-6 or mid >= a1 - 1e-6:
-            # Degenerate interval due to rounding; stop
-            break
+        # Find ALL intervals exceeding threshold
+        intervals_to_split = []
+        for i, dist in enumerate(dists):
+            if dist > threshold + 1e-9:
+                num_subdivisions = compute_subdivisions(dist, threshold)
+                intervals_to_split.append((i, num_subdivisions))
 
-        # Render the mid preview cheaply
-        try:
-            mid_img_list = render_alphas(p1, p2, [mid], preview_size, preview_size)
-            if not mid_img_list:
+        if not intervals_to_split:
+            break  # All intervals below threshold
+
+        print(f"Round {rounds}: splitting {len(intervals_to_split)} intervals")
+
+        # Process intervals from right to left to maintain indices
+        new_alphas = []
+        new_imgs = []
+        intervals_to_split.sort(reverse=True)  # Process from highest index to lowest
+
+        # Build new sequences by processing each original interval
+        current_alphas = alphas[:]
+        current_imgs = preview_imgs[:]
+
+        for interval_idx, num_subdivisions in intervals_to_split:
+            if insertions >= max_insertions:
                 break
-            mid_img = mid_img_list[0]
-        except Exception:
-            break
 
-        # Insert into sequences
-        alphas = alphas[: max_idx + 1] + [mid] + alphas[max_idx + 1 :]
-        preview_imgs = (
-            preview_imgs[: max_idx + 1] + [mid_img] + preview_imgs[max_idx + 1 :]
-        )
-        insertions += 1
+            a0, a1 = current_alphas[interval_idx], current_alphas[interval_idx + 1]
+
+            # Generate subdivision points
+            subdivision_alphas = []
+            for j in range(1, num_subdivisions + 1):
+                mid_alpha = a0 + (a1 - a0) * j / (num_subdivisions + 1)
+                mid_alpha = float(round(mid_alpha, 6))
+                if mid_alpha > a0 + 1e-6 and mid_alpha < a1 - 1e-6:
+                    subdivision_alphas.append(mid_alpha)
+
+            if not subdivision_alphas:
+                continue
+
+            # Render subdivision images
+            try:
+                subdivision_imgs = render_alphas(
+                    p1, p2, subdivision_alphas, preview_size, preview_size
+                )
+                if len(subdivision_imgs) != len(subdivision_alphas):
+                    continue
+            except Exception as e:
+                print(f"Failed to render subdivisions: {e}")
+                continue
+
+            # Insert subdivisions into current sequences
+            insert_pos = interval_idx + 1
+            current_alphas = (
+                current_alphas[:insert_pos]
+                + subdivision_alphas
+                + current_alphas[insert_pos:]
+            )
+            current_imgs = (
+                current_imgs[:insert_pos] + subdivision_imgs + current_imgs[insert_pos:]
+            )
+
+            insertions += len(subdivision_alphas)
+
+            # Update indices for remaining intervals (shift right due to insertions)
+            for k in range(len(intervals_to_split)):
+                if intervals_to_split[k][0] <= interval_idx:
+                    old_idx, old_subdivs = intervals_to_split[k]
+                    intervals_to_split[k] = (
+                        old_idx + len(subdivision_alphas),
+                        old_subdivs,
+                    )
+
+        alphas = current_alphas
+        preview_imgs = current_imgs
         rounds += 1
 
     return alphas, preview_imgs
