@@ -5,9 +5,13 @@ window management, and animation timing that can be shared across different
 CLI tools in the dreamspace project.
 """
 
+import glob
+import os
 import time
 from typing import List, Optional, Tuple, Union
+
 from enum import Enum
+from pathlib import Path
 import pygame
 from PIL import Image
 from screeninfo import get_monitors
@@ -271,9 +275,6 @@ def load_png_frames(directory: str) -> List[Image.Image]:
         FileNotFoundError: If directory doesn't exist
         ValueError: If no PNG files found
     """
-    import os
-    import glob
-    from pathlib import Path
     
     directory_path = Path(directory)
     if not directory_path.exists():
@@ -307,8 +308,9 @@ def load_png_frames(directory: str) -> List[Image.Image]:
                 image = background
             elif image.mode != 'RGB':
                 image = image.convert('RGB')
-            
-            frames.append(image)
+
+            frames.append(image.copy())  # Copy the image to avoid keeping the file handle open
+            image.close()  # Close the file handle
             
             # Print progress for large batches
             if len(png_files) > 10 and (i + 1) % 10 == 0:
