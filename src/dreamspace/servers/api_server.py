@@ -606,7 +606,7 @@ def _refine_by_threshold_greedy_split(
         ratio = distance / threshold
         return max(1, min(64, int(ratio)))  # Cap at 64 subdivisions per interval
 
-    while rounds < max_depth and insertions < max_insertions:
+    while rounds < max_depth:
         if len(preview_imgs) < 2:
             break
 
