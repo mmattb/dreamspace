@@ -588,18 +588,6 @@ def _refine_by_threshold_greedy_split(
     if len(alphas) < 2 or threshold is None:
         return alphas, preview_imgs
 
-    # Cap on total insertions based on global budget
-    if request.max_frames_total is not None:
-        remaining = max(
-            0, int(request.max_frames_total) - (total_frames_saved + len(alphas))
-        )
-        max_insertions = remaining
-    else:
-        max_insertions = (
-            max_depth * 500
-        )  # more generous default for multi-split approach
-
-    insertions = 0
     rounds = 0
 
     def pairwise_dist(imgs: List[Image.Image]) -> List[float]:
@@ -622,127 +610,114 @@ def _refine_by_threshold_greedy_split(
         if len(preview_imgs) < 2:
             break
 
-        # TODO: prune pass
-        # TODO: paralellize resample
-
         dists = pairwise_dist(preview_imgs)
         if not dists:
             break
 
-        # Find ALL intervals exceeding threshold
-        intervals_to_split = []
-        for i, dist in enumerate(dists):
-            if dist > threshold + 1e-9:
-                num_subdivisions = compute_subdivision_count(dist, threshold)
-                intervals_to_split.append((i, num_subdivisions))
+        current_alphas, current_imgs = _resample_prune(
+            dists, threshold, alphas, preview_imgs, preview_size=preview_size
+        )
 
-        if not intervals_to_split:
-            break  # All intervals below threshold
-
-        print(f"Round {rounds}: splitting {len(intervals_to_split)} intervals")
-
-        # Process intervals from right to left to maintain indices
-        intervals_to_split.sort(reverse=True)  # Process from highest index to lowest
-
-        # Build new sequences by processing each original interval
-        current_alphas = alphas[:]
-        current_imgs = preview_imgs[:]
-
-        for interval_idx, num_subdivisions in intervals_to_split:
-            if insertions >= max_insertions:
-                break
-
-            a0, a1 = current_alphas[interval_idx], current_alphas[interval_idx + 1]
-
-            # Generate subdivision points
-            subdivision_alphas = []
-            for j in range(1, num_subdivisions + 1):
-                mid_alpha = a0 + (a1 - a0) * j / (num_subdivisions + 1)
-                subdivision_alphas.append(mid_alpha)
-
-            if not subdivision_alphas:
-                continue
-
-            # Render subdivision images
-            try:
-                subdivision_imgs = render_alphas(
-                    p1, p2, subdivision_alphas, preview_size, preview_size, quiet=True
-                )
-                if len(subdivision_imgs) != len(subdivision_alphas):
-                    continue
-            except Exception as e:
-                print(f"Failed to render subdivisions: {e}")
-                continue
-
-            # Insert subdivisions into current sequences
-            insert_pos = interval_idx + 1
-            current_alphas = (
-                current_alphas[:insert_pos]
-                + subdivision_alphas
-                + current_alphas[insert_pos:]
-            )
-            current_imgs = (
-                current_imgs[:insert_pos] + subdivision_imgs + current_imgs[insert_pos:]
-            )
-
-            insertions += len(subdivision_alphas)
-
-            # Update indices for remaining intervals (shift right due to insertions)
-            for k in range(len(intervals_to_split)):
-                if intervals_to_split[k][0] <= interval_idx:
-                    old_idx, old_subdivs = intervals_to_split[k]
-                    intervals_to_split[k] = (
-                        old_idx + len(subdivision_alphas),
-                        old_subdivs,
-                    )
+        current_alphas, current_imgs = _resample_upsample(
+            dists, threshold, current_alphas, current_imgs, preview_size=preview_size
+        )
 
         alphas = current_alphas
         preview_imgs = current_imgs
         rounds += 1
 
+    # Tail prune pass
+    alphas, preview_imgs = _resample_prune(dists, threshold, alphas, preview_imgs)
+
     return alphas, preview_imgs
 
 
-def _prune_small_motion(
-    alphas: List[float],
-    preview_imgs: List[Image.Image],
-    metric_name: str,
-    prune_threshold: float,
+def _resample_prune(
+    dists,
+    threshold,
+    alphas,
+    preview_imgs,
+    quiet=False,
+    preview_size=256,
 ):
-    """Prune near-duplicate frames so each kept step has at least prune_threshold motion.
+    # TODO: prune pass
+    return alphas, preview_imgs
 
-    Always keeps the first and last frames.
-    Returns (kept_alphas, kept_preview_imgs).
-    """
-    n = len(alphas)
-    if n <= 2:
-        return alphas, preview_imgs
 
-    kept_a = [alphas[0]]
-    kept_i = [preview_imgs[0]]
-    last_kept_img = preview_imgs[0]
+def _resample_upsample(
+    dists,
+    threshold,
+    alphas,
+    preview_imgs,
+    quiet=False,
+    preview_size=256,
+):
+    # Find all intervals exceeding threshold
+    intervals_to_split = []
+    for i, dist in enumerate(dists):
+        if dist > threshold + 1e-9:
+            num_subdivisions = compute_subdivision_count(dist, threshold)
+            intervals_to_split.append((i, num_subdivisions))
 
-    for i in range(1, n - 1):
-        d = _compute_metric(last_kept_img, preview_imgs[i], metric_name)
-        if d >= max(prune_threshold, 0.0):
-            kept_a.append(alphas[i])
-            kept_i.append(preview_imgs[i])
-            last_kept_img = preview_imgs[i]
+    if not intervals_to_split:
+        return alphas, imgs
 
-    # Always include the last endpoint
-    kept_a.append(alphas[-1])
-    kept_i.append(preview_imgs[-1])
+    if not quiet:
+        print(f"Round {rounds}: splitting {len(intervals_to_split)} intervals")
 
-    # Clean tiny alpha jitter
-    cleaned_a: List[float] = []
-    cleaned_i: List[Image.Image] = []
-    for a, img in zip(kept_a, kept_i):
-        a = float(round(min(1.0, max(0.0, a)), 6))
-        if not cleaned_a or abs(a - cleaned_a[-1]) > 1e-6:
-            cleaned_a.append(a)
-            cleaned_i.append(img)
+    # Process intervals from right to left to maintain indices
+    intervals_to_split.sort(reverse=True)  # Process from highest index to lowest
 
-    return cleaned_a, cleaned_i
+    # Build new sequences by processing each original interval
+    current_alphas = alphas[:]
+    current_imgs = preview_imgs[:]
+
+    for interval_idx, num_subdivisions in intervals_to_split:
+        a0, a1 = current_alphas[interval_idx], current_alphas[interval_idx + 1]
+
+        # Generate subdivision points
+        subdivision_alphas = []
+        for j in range(1, num_subdivisions + 1):
+            mid_alpha = a0 + (a1 - a0) * j / (num_subdivisions + 1)
+            subdivision_alphas.append(mid_alpha)
+
+        if not subdivision_alphas:
+            continue
+
+        # TODO: paralellize resample
+
+        # Render subdivision images
+        try:
+            subdivision_imgs = render_alphas(
+                p1, p2, subdivision_alphas, preview_size, preview_size, quiet=True
+            )
+            if len(subdivision_imgs) != len(subdivision_alphas):
+                continue
+        except Exception as e:
+            print(f"Failed to render subdivisions: {e}")
+            continue
+
+        # Insert subdivisions into current sequences
+        insert_pos = interval_idx + 1
+        current_alphas = (
+            current_alphas[:insert_pos]
+            + subdivision_alphas
+            + current_alphas[insert_pos:]
+        )
+        current_imgs = (
+            current_imgs[:insert_pos] + subdivision_imgs + current_imgs[insert_pos:]
+        )
+
+        # Update indices for remaining intervals (shift right due to insertions)
+        for k in range(len(intervals_to_split)):
+            if intervals_to_split[k][0] <= interval_idx:
+                old_idx, old_subdivs = intervals_to_split[k]
+                intervals_to_split[k] = (
+                    old_idx + len(subdivision_alphas),
+                    old_subdivs,
+                )
+
+    return current_alphas, current_imgs
 
 
 def _process_adaptive_segment(
@@ -890,24 +865,12 @@ def _async_adaptive_multi_prompt_worker(
                 "latent_cookie": gen_params["latent_cookie"],
                 "quiet": quiet,
             }
-            if hasattr(backend, "generate_interpolated_embeddings_at_alphas"):
-                res = backend.generate_interpolated_embeddings_at_alphas(
-                    alphas=alphas, **kwargs
-                )
-            else:
-                # Fallback: approximate via uniform batch
-                res = backend.generate_interpolated_embeddings(
-                    batch_size=max(2, len(alphas)),
-                    **{
-                        k: v
-                        for k, v in kwargs.items()
-                        if k not in ["prompt1", "prompt2", "width", "height"]
-                    },
-                    prompt1=p1,
-                    prompt2=p2,
-                    width=width,
-                    height=height,
-                )
+
+            # XXX can raise error if this backend doesn't support it.
+            res = backend.generate_interpolated_embeddings_at_alphas(
+                alphas=alphas, **kwargs
+            )
+
             return res.get("images", [])
 
         # Extract algorithm parameters
