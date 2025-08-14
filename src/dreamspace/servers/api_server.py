@@ -890,7 +890,7 @@ def _refine_by_threshold_greedy_split(
             # Render subdivision images
             try:
                 subdivision_imgs = render_alphas(
-                    p1, p2, subdivision_alphas, preview_size, preview_size
+                    p1, p2, subdivision_alphas, preview_size, preview_size, quiet=True
                 )
                 if len(subdivision_imgs) != len(subdivision_alphas):
                     continue
@@ -984,9 +984,7 @@ def _process_adaptive_segment(
     prompt_pairs_len: int,
 ) -> List:
     """Process a single segment with adaptive interpolation."""
-    print(
-        f"🔄 [Job {job_id[:8]}] Segment {seg_idx+1}/{prompt_pairs_len}: '{p1[:30]}...' → '{p2[:30]}...'"
-    )
+    print(f"🔄 [Job {job_id[:8]}] Segment {seg_idx+1}/{prompt_pairs_len}")
 
     # Generate initial uniform grid
     alphas = [i / (base_n - 1) for i in range(base_n)] if base_n > 1 else [0.0]
@@ -1044,6 +1042,7 @@ def _process_adaptive_segment(
     # Full-res render
     full_imgs = []
     CHUNK = 64
+    print("Okay final render of segment", len(final_alphas))
     for s in range(0, len(final_alphas), CHUNK):
         sub = final_alphas[s : s + CHUNK]
         imgs = render_alphas(p1, p2, sub, request.width, request.height)
@@ -1120,7 +1119,12 @@ def _async_adaptive_multi_prompt_worker(
 
         # Render function (replaces _create_render_function)
         def render_alphas(
-            p1: str, p2: str, alphas: List[float], width: int, height: int
+            p1: str,
+            p2: str,
+            alphas: List[float],
+            width: int,
+            height: int,
+            quiet: bool = True,
         ):
             kwargs = {
                 "prompt1": p1,
@@ -1132,6 +1136,7 @@ def _async_adaptive_multi_prompt_worker(
                 "height": height,
                 "seed": gen_params["seed"],
                 "latent_cookie": gen_params["latent_cookie"],
+                "quiet": quiet,
             }
             if hasattr(backend, "generate_interpolated_embeddings_at_alphas"):
                 res = backend.generate_interpolated_embeddings_at_alphas(

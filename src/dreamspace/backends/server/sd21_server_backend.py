@@ -45,7 +45,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         self._load_pipelines()
 
     def _calculate_sub_batch_size(
-        self, total_batch_size: int, width: int, height: int
+        self, total_batch_size: int, width: int, height: int, quiet: bool = False
     ) -> int:
         """Calculate optimal sub-batch size based on memory heuristics.
 
@@ -94,11 +94,16 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             1, min(sub_batch_size, 34)
         )  # Never more than 8 per sub-batch for SD 2.1
 
-        print(f"📊 SD 2.1 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):")
-        print(
-            f"   Estimated {memory_per_image_gb:.2f}GB per image (SD 2.1 is memory-intensive)"
-        )
-        print(f"   Sub-batch size: {sub_batch_size} (from total {total_batch_size})")
+        if not quiet:
+            print(
+                f"📊 SD 2.1 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):"
+            )
+            print(
+                f"   Estimated {memory_per_image_gb:.2f}GB per image (SD 2.1 is memory-intensive)"
+            )
+            print(
+                f"   Sub-batch size: {sub_batch_size} (from total {total_batch_size})"
+            )
 
         return sub_batch_size
 
@@ -741,6 +746,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         alphas: List[float],
         output_format: str = "pil",
         latent_cookie: Optional[int] = None,
+        quiet: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """Generate images at specific interpolation alpha values between two prompts.
@@ -757,9 +763,10 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         """
         total_start = time.time()
         batch_size = len(alphas)
-        print(
-            f"🎯 Starting precise interpolated embedding generation: '{prompt1}' → '{prompt2}' at {batch_size} specific alphas"
-        )
+        if not quiet:
+            print(
+                f"🎯 Starting precise interpolated embedding generation: '{prompt1}' → '{prompt2}' at {batch_size} specific alphas"
+            )
 
         # Setup phase
         setup_start = time.time()
@@ -780,7 +787,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
 
         setup_time = time.time() - setup_start
-        print(f"⚙️ Setup completed in {setup_time:.3f}s")
+        if not quiet:
+            print(f"⚙️ Setup completed in {setup_time:.3f}s")
 
         # Encode both prompts into embeddings properly
         encode_start = time.time()
@@ -794,7 +802,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
 
         # Create interpolated embeddings at exact alphas
         interpolated_embeddings = []
-        print(f"🔍 Creating {batch_size} interpolation steps at exact alphas")
+        if not quiet:
+            print(f"🔍 Creating {batch_size} interpolation steps at exact alphas")
 
         for alpha in alphas:
             # Ensure alpha is in valid range
@@ -804,9 +813,10 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
 
         # Stack all interpolated embeddings into a batch
         batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)
-        print(
-            f"📦 Batched {len(interpolated_embeddings)} interpolated embeddings, shape: {batch_prompt_embeds.shape}"
-        )
+        if not quiet:
+            print(
+                f"📦 Batched {len(interpolated_embeddings)} interpolated embeddings, shape: {batch_prompt_embeds.shape}"
+            )
 
         # Create negative embeddings for classifier-free guidance (use empty prompt)
         negative_embedding = self._extract_text_embeddings("")
@@ -816,7 +826,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         batch_combined_embeds = torch.cat([batch_negative_embeds, batch_prompt_embeds])
 
         encode_time = time.time() - encode_start
-        print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
+        if not quiet:
+            print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
 
         # Prepare initial noise for the batch - use same latent for all interpolation steps (with optional caching)
         noise_start = time.time()
@@ -825,10 +836,12 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         if latent_cookie is not None:
             latent_key = (latent_cookie, height, width)  # Include dimensions in key
             if latent_key in self.latent_cache:
-                print(f"🍪 Using cached latent for cookie {latent_cookie}")
+                if not quiet:
+                    print(f"🍪 Using cached latent for cookie {latent_cookie}")
                 single_latent = self.latent_cache[latent_key].clone()
             else:
-                print(f"🍪 Creating new latent for cookie {latent_cookie}")
+                if not quiet:
+                    print(f"🍪 Creating new latent for cookie {latent_cookie}")
                 single_latent = self.pipe.prepare_latents(
                     batch_size=1,
                     num_channels_latents=self.pipe.unet.config.in_channels,
@@ -853,7 +866,9 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             )
 
         # Calculate optimal sub-batch size for memory management
-        sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
+        sub_batch_size = self._calculate_sub_batch_size(
+            batch_size, width, height, quiet=quiet
+        )
 
         # If sub-batching is needed
         if sub_batch_size < batch_size:
@@ -872,7 +887,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         batch_latents = single_latent.repeat(batch_size, 1, 1, 1)
 
         noise_time = time.time() - noise_start
-        print(f"🎲 Noise preparation completed in {noise_time:.3f}s")
+        if not quiet:
+            print(f"🎲 Noise preparation completed in {noise_time:.3f}s")
 
         # Diffusion process
         diffusion_start = time.time()
@@ -904,7 +920,8 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
 
         diffusion_time = time.time() - diffusion_start
-        print(f"🌊 Diffusion process completed in {diffusion_time:.3f}s")
+        if not quiet:
+            print(f"🌊 Diffusion process completed in {diffusion_time:.3f}s")
 
         # Decode latents to images
         decode_start = time.time()
@@ -924,15 +941,16 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             pil_images = [Image.fromarray(img) for img in images]
 
         decode_time = time.time() - decode_start
-        print(f"🖼️ Image decoding completed in {decode_time:.3f}s")
 
         total_time = time.time() - total_start
 
-        print(f"✅ Precise interpolated embedding generation complete!")
-        print(
-            f"📊 Generated {len(pil_images)} images in {total_time:.3f}s ({total_time/len(pil_images):.3f}s per image)"
-        )
-        print(f"🎯 Alpha precision: Exact interpolation at specified values")
+        if not quiet:
+            print(f"🖼️ Image decoding completed in {decode_time:.3f}s")
+            print(f"✅ Precise interpolated embedding generation complete!")
+            print(
+                f"📊 Generated {len(pil_images)} images in {total_time:.3f}s ({total_time/len(pil_images):.3f}s per image)"
+            )
+            print(f"🎯 Alpha precision: Exact interpolation at specified values")
 
         # Return in the expected format
         return {
