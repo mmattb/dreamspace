@@ -596,16 +596,6 @@ def _refine_by_threshold_greedy_split(
             for i in range(len(imgs) - 1)
         ]
 
-    def compute_subdivision_count(distance: float, threshold: float) -> int:
-        """Compute number of subdivisions based on how much distance exceeds threshold."""
-        if distance <= threshold:
-            return 0
-        # Linear scaling: more subdivisions for larger distances
-        # For distance = 2*threshold, add 1 subdivision
-        # For distance = 4*threshold, add 3 subdivisions, etc.
-        ratio = distance / threshold
-        return max(1, min(64, int(ratio)))  # Cap at 64 subdivisions per interval
-
     while rounds < max_depth:
         if len(preview_imgs) < 2:
             break
@@ -642,6 +632,17 @@ def _resample_prune(
 ):
     # TODO: prune pass
     return alphas, preview_imgs
+
+
+def compute_subdivision_count(distance: float, threshold: float) -> int:
+    """Compute number of subdivisions based on how much distance exceeds threshold."""
+    if distance <= threshold:
+        return 0
+    # Linear scaling: more subdivisions for larger distances
+    # For distance = 2*threshold, add 1 subdivision
+    # For distance = 4*threshold, add 3 subdivisions, etc.
+    ratio = distance / threshold
+    return max(1, min(64, int(ratio)))  # Cap at 64 subdivisions per interval
 
 
 def _resample_upsample(
