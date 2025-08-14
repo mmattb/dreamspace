@@ -1002,7 +1002,7 @@ def _process_adaptive_segment(
     # Threshold mode: iterative split + prune
     if request.threshold is not None:
         thr = float(request.threshold)
-        alphas, preview_imgs = _refine_by_threshold_greedy_split(
+        final_alphas, _ = _refine_by_threshold_greedy_split(
             alphas,
             preview_imgs,
             p1,
