@@ -673,38 +673,54 @@ def _resample_upsample(
     current_alphas = alphas[:]
     current_imgs = preview_imgs[:]
 
+    # List of lists. Each sublist contains the extra sample points between a
+    #  given existing pair of points. We will collapse this list into a single
+    #  list for big batching efficiency.
+    subdivision_alphas = []
+    split_intervals_idxs = []  # The intervals we actually split, just in case...
     for interval_idx, num_subdivisions in intervals_to_split:
         a0, a1 = current_alphas[interval_idx], current_alphas[interval_idx + 1]
 
         # Generate subdivision points
-        subdivision_alphas = []
+        _subdivision_alphas = []
         for j in range(1, num_subdivisions + 1):
             mid_alpha = a0 + (a1 - a0) * j / (num_subdivisions + 1)
-            subdivision_alphas.append(mid_alpha)
+            _subdivision_alphas.append(mid_alpha)
 
-        if not subdivision_alphas:
-            continue
+        if _subdivision_alphas:
+            subdivision_alphas.append(_subdivision_alphas)
+            split_intervals_idxs.append(interval_idx)
 
-        # TODO: paralellize resample
-
+    # There we go. Now we collapse to a single list and dispatch to renderer.
+    # This is more complex since we need to unpack it later, but it enables
+    # parallelized dispatch on the backend.
+    all_subdivision_alphas = [i for sublist in subdivision_alphas for i in sublist]
+    try:
         # Render subdivision images
-        try:
-            subdivision_imgs = render_alphas(
-                p1, p2, subdivision_alphas, preview_size, preview_size, quiet=True
-            )
-            if len(subdivision_imgs) != len(subdivision_alphas):
-                continue
-        except Exception as e:
-            print(f"Failed to render subdivisions: {e}")
-            continue
+        if not quiet:
+            print(f"Dispatching {len(all_subdivision_alphas)} for render.")
+        all_subdivision_imgs = render_alphas(
+            p1, p2, all_subdivision_alphas, preview_size, preview_size, quiet=True
+        )
+    except Exception as e:
+        print(f"Failed to render subdivisions: {e}")
+        continue
+
+    asi_idx = 0
+    for si_idx, interval_idx in enumerate(split_intervals_idxs):
+        # Now unpack
+
+        num_subdivisions = intervals_to_split[interval_idx]
+        cur_sd_alphas = subdivision_alphas[si_idx]
 
         # Insert subdivisions into current sequences
         insert_pos = interval_idx + 1
         current_alphas = (
-            current_alphas[:insert_pos]
-            + subdivision_alphas
-            + current_alphas[insert_pos:]
+            current_alphas[:insert_pos] + cur_sd_alphas + current_alphas[insert_pos:]
         )
+
+        subdivision_imgs = all_subdivision_imgs[asi_idx : asi_idx + len(cur_sd_alphas)]
+
         current_imgs = (
             current_imgs[:insert_pos] + subdivision_imgs + current_imgs[insert_pos:]
         )
@@ -717,6 +733,8 @@ def _resample_upsample(
                     old_idx + len(subdivision_alphas),
                     old_subdivs,
                 )
+
+        asi_idx += len(cur_sd_alphas)
 
     return current_alphas, current_imgs
 
