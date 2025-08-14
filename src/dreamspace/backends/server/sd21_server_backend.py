@@ -10,7 +10,7 @@ import torch
 from PIL import Image
 
 from ...core.base import ImgGenBackend
-from ...core.utils import no_grad_method
+from ...core.utils import no_grad_method, slerp
 from ...config.settings import Config, ModelConfig
 
 
@@ -801,15 +801,10 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
             raise ValueError("Failed to extract text embeddings from prompts")
 
         # Create interpolated embeddings at exact alphas
-        interpolated_embeddings = []
         if not quiet:
             print(f"🔍 Creating {batch_size} interpolation steps at exact alphas")
 
-        for alpha in alphas:
-            # Ensure alpha is in valid range
-            alpha = max(0.0, min(1.0, float(alpha)))
-            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
-            interpolated_embeddings.append(interpolated)
+        interpolated_embeddings = slerp(embedding1, embedding2, alphas)
 
         # Stack all interpolated embeddings into a batch
         batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)

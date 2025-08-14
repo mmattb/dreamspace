@@ -141,6 +141,9 @@ class AsyncAdaptiveMultiPromptRequest(BaseModel):
         description="List of prompts for multi-prompt interpolation sequence (minimum 2 prompts)",
     )
     output_dir: str = Field(..., description="Directory where PNG files will be saved")
+    threshold: float = Field(
+        None, description="Subdivide until adjacent distances <= threshold"
+    )
     model: Optional[str] = Field(
         "sd15_server",
         description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'",
@@ -163,9 +166,6 @@ class AsyncAdaptiveMultiPromptRequest(BaseModel):
     )
     metric: Optional[str] = Field(
         "mse", description="Perceptual metric: 'lpips', 'ssim', or 'mse'"
-    )
-    threshold: Optional[float] = Field(
-        None, description="If set, subdivide until adjacent distances <= threshold"
     )
     target_frames_per_segment: Optional[int] = Field(
         None,
@@ -567,233 +567,6 @@ def _compute_metric(img_a: Image.Image, img_b: Image.Image, metric: str) -> floa
     return float(sq_sum / (total * 255.0 * 255.0))
 
 
-def _importance_resample(
-    alphas: List[float], images: List[Image.Image], target_k: int, metric: str
-) -> List[float]:
-    """Resample alphas so adjacent frames have roughly uniform perceptual motion.
-
-    Algorithm (arc-length reparameterization):
-    - Compute pairwise perceptual distances between consecutive preview images.
-    - Build cumulative arc length over the current alpha grid.
-    - Place `target_k` samples at equally spaced cumulative distances and
-      linearly interpolate their alpha positions within the corresponding segment.
-
-    Note: This produces exactly K frames distributed by perceptual motion.
-    It is not the iterative add/prune scheme; that approximation is handled by
-    threshold-mode + proportional densification elsewhere.
-    """
-    # Handle trivial cases quickly
-    if target_k <= 2 or len(alphas) <= 2:
-        return [alphas[0], alphas[-1]] if target_k == 2 else alphas[:target_k]
-
-    # 1) Pairwise perceptual distances between consecutive preview frames
-    pairwise_distances: List[float] = []
-    for i in range(len(images) - 1):
-        dist = _compute_metric(images[i], images[i + 1], metric)
-        pairwise_distances.append(max(0.0, dist))
-
-    # 2) Cumulative arc length along the sequence
-    cumulative_distances: List[float] = [0.0]
-    for d in pairwise_distances:
-        cumulative_distances.append(cumulative_distances[-1] + d)
-
-    total_arc_length = (
-        cumulative_distances[-1] if cumulative_distances[-1] > 0 else 1e-6
-    )
-
-    # 3) Target equally spaced arc-length positions and corresponding alphas
-    target_arc_positions = [
-        i * (total_arc_length / (target_k - 1)) for i in range(target_k)
-    ]
-    resampled_alphas: List[float] = []
-    segment_index = 0
-
-    for target_distance in target_arc_positions:
-        # Find the segment [segment_index, segment_index+1] that spans this target arc distance
-        while (
-            segment_index < len(cumulative_distances) - 1
-            and cumulative_distances[segment_index + 1] < target_distance
-        ):
-            segment_index += 1
-
-        if segment_index >= len(cumulative_distances) - 1:
-            # Past the end — clamp to last alpha
-            resampled_alphas.append(alphas[-1])
-        else:
-            seg_start_cum = cumulative_distances[segment_index]
-            seg_end_cum = cumulative_distances[segment_index + 1]
-            alpha_start = alphas[segment_index]
-            alpha_end = alphas[segment_index + 1]
-
-            if seg_end_cum == seg_start_cum:
-                # No motion in this segment — snap to start alpha
-                resampled_alphas.append(alpha_start)
-            else:
-                local_fraction = (target_distance - seg_start_cum) / (
-                    seg_end_cum - seg_start_cum
-                )
-                resampled_alphas.append(
-                    alpha_start + local_fraction * (alpha_end - alpha_start)
-                )
-
-    # Ensure original endpoints are preserved exactly
-    resampled_alphas[0] = alphas[0]
-    resampled_alphas[-1] = alphas[-1]
-
-    # Deduplicate tiny deltas (scheduler/float noise) and keep order
-    deduped_alphas: List[float] = []
-    for a in resampled_alphas:
-        if not deduped_alphas or abs(a - deduped_alphas[-1]) > 1e-6:
-            deduped_alphas.append(a)
-    return deduped_alphas
-
-
-def _adaptive_resample_alphas(
-    alphas: List[float],
-    preview_imgs: List,
-    request: AsyncAdaptiveMultiPromptRequest,
-    metric_name: str,
-    total_frames_saved: int,
-) -> List[float]:
-    """Choose alphas for a segment using either K-targeted or threshold-based strategy.
-
-    Behavior:
-    - target_frames_per_segment set: use arc-length resampling to return exactly K frames
-      (see _importance_resample).
-    - threshold set: estimate K ≈ total_motion / threshold + 1, optionally clamp to
-      global budget, then do a single arc-length resample. This is a one-shot
-      approximation of the iterative add/prune pseudocode. Additional proportional
-      densification happens later in _densify_alphas.
-    - neither set: keep the current uniform grid.
-    """
-    target_frame_count = (
-        int(request.target_frames_per_segment)
-        if request.target_frames_per_segment
-        else None
-    )
-    motion_threshold = (
-        float(request.threshold) if request.threshold is not None else None
-    )
-
-    if target_frame_count:
-        resampled = _importance_resample(
-            alphas, preview_imgs, target_frame_count, metric_name
-        )
-        final_alphas = sorted(set(round(a, 6) for a in resampled))
-    elif motion_threshold is not None:
-        # Arc-length based resampling to achieve ~constant perceptual motion.
-        pairwise_distances = [
-            _compute_metric(preview_imgs[i], preview_imgs[i + 1], metric_name)
-            for i in range(len(preview_imgs) - 1)
-        ]
-        total_motion = sum(pairwise_distances) if pairwise_distances else 0.0
-
-        if total_motion <= 1e-9:
-            # Essentially no motion: prune to endpoints
-            final_alphas = [alphas[0], alphas[-1]] if len(alphas) > 1 else [alphas[0]]
-        else:
-            # Estimate a frame count so that expected per-frame motion ≈ threshold
-            estimated_frame_count = max(
-                2, int(math.ceil(total_motion / max(motion_threshold, 1e-9))) + 1
-            )
-
-            # Honor global cap if provided
-            if request.max_frames_total is not None:
-                remaining_budget = max(
-                    2, int(request.max_frames_total) - total_frames_saved
-                )
-                estimated_frame_count = max(
-                    2, min(estimated_frame_count, remaining_budget)
-                )
-
-            resampled = _importance_resample(
-                alphas, preview_imgs, estimated_frame_count, metric_name
-            )
-            final_alphas = sorted(set(round(a, 6) for a in resampled))
-    else:
-        # Uniform mode: preserve current grid
-        final_alphas = alphas
-
-    return final_alphas
-
-
-def _densify_alphas(
-    final_alphas: List[float],
-    p1: str,
-    p2: str,
-    render_alphas,
-    preview_size: int,
-    metric_name: str,
-    threshold: Optional[float],
-    request: AsyncAdaptiveMultiPromptRequest,
-    total_frames_saved: int,
-) -> List[float]:
-    """Apply proportional densification between anchor points."""
-    if len(final_alphas) < 2:
-        return final_alphas
-
-    # Compute preview images at anchor alphas (cheap) to estimate per-interval motion
-    anchor_preview = render_alphas(p1, p2, final_alphas, preview_size, preview_size)
-
-    def pair_dists(imgs):
-        return [
-            _compute_metric(imgs[i], imgs[i + 1], metric_name)
-            for i in range(len(imgs) - 1)
-        ]
-
-    d2 = pair_dists(anchor_preview)
-    total2 = sum(d2) if d2 else 0.0
-    # Target per-frame motion
-    if threshold is not None and total2 > 0:
-        target_step = max(threshold, 1e-9)
-    elif total2 > 0 and len(final_alphas) > 1:
-        target_step = max(total2 / (len(final_alphas) - 1), 1e-9)
-    else:
-        target_step = 1.0
-
-    densified = [final_alphas[0]]
-
-    # Respect global frame cap if present
-    def remaining_budget(current_len: int) -> Optional[int]:
-        if request.max_frames_total is None:
-            return None
-        return max(
-            0,
-            int(request.max_frames_total) - (total_frames_saved + current_len),
-        )
-
-    for i in range(len(final_alphas) - 1):
-        a0, a1 = final_alphas[i], final_alphas[i + 1]
-        motion = d2[i] if i < len(d2) else 0.0
-        # Desired number of segments for this interval
-        desired_segments = (
-            1 if target_step <= 0 else max(1, int(round(motion / target_step)))
-        )
-        # Cap to avoid explosion
-        desired_segments = min(desired_segments, 64)
-        # Ensure we don't exceed global cap
-        rem = remaining_budget(len(densified))
-        if rem is not None:
-            # rem counts frames, segments = frames between + 1; translate conservative
-            # Keep at least one segment to include the endpoint
-            max_segments_for_interval = max(1, rem)  # we will add endpoint below
-            desired_segments = min(desired_segments, max_segments_for_interval)
-        # Insert evenly spaced points inside (a0,a1)
-        for k in range(1, desired_segments):
-            t = k / desired_segments
-            densified.append(a0 + t * (a1 - a0))
-        densified.append(a1)
-
-    # Deduplicate tiny deltas and clamp to [0,1]
-    cleaned = []
-    for a in densified:
-        a = min(1.0, max(0.0, float(round(a, 6))))
-        if not cleaned or abs(a - cleaned[-1]) > 1e-6:
-            cleaned.append(a)
-
-    return cleaned
-
-
 def _refine_by_threshold_greedy_split(
     alphas: List[float],
     preview_imgs: List[Image.Image],
@@ -835,7 +608,7 @@ def _refine_by_threshold_greedy_split(
             for i in range(len(imgs) - 1)
         ]
 
-    def compute_subdivisions(distance: float, threshold: float) -> int:
+    def compute_subdivision_count(distance: float, threshold: float) -> int:
         """Compute number of subdivisions based on how much distance exceeds threshold."""
         if distance <= threshold:
             return 0
@@ -849,6 +622,9 @@ def _refine_by_threshold_greedy_split(
         if len(preview_imgs) < 2:
             break
 
+        # TODO: prune pass
+        # TODO: paralellize resample
+
         dists = pairwise_dist(preview_imgs)
         if not dists:
             break
@@ -857,7 +633,7 @@ def _refine_by_threshold_greedy_split(
         intervals_to_split = []
         for i, dist in enumerate(dists):
             if dist > threshold + 1e-9:
-                num_subdivisions = compute_subdivisions(dist, threshold)
+                num_subdivisions = compute_subdivision_count(dist, threshold)
                 intervals_to_split.append((i, num_subdivisions))
 
         if not intervals_to_split:
@@ -883,6 +659,9 @@ def _refine_by_threshold_greedy_split(
             for j in range(1, num_subdivisions + 1):
                 mid_alpha = a0 + (a1 - a0) * j / (num_subdivisions + 1)
                 subdivision_alphas.append(mid_alpha)
+            subdivision_alphas = subdivision_alphas(
+                torch.tensor(0.0), torch.tensor(1.0), subdivision_alphas
+            )
 
             if not subdivision_alphas:
                 continue
@@ -1000,44 +779,20 @@ def _process_adaptive_segment(
             )
 
     # Threshold mode: iterative split + prune
-    if request.threshold is not None:
-        thr = float(request.threshold)
-        final_alphas, _ = _refine_by_threshold_greedy_split(
-            alphas,
-            preview_imgs,
-            p1,
-            p2,
-            render_alphas,
-            preview_size,
-            metric_name,
-            thr,
-            int(request.max_depth),
-            request,
-            total_frames_saved,
-        )
-        # Prune with hysteresis (lower than split threshold to avoid oscillation)
-        prune_thr = max(thr * 0.4, 0.0)
-        final_alphas, _ = _prune_small_motion(
-            alphas, preview_imgs, metric_name, prune_thr
-        )
-    else:
-        # Apply adaptive resampling (K-targeted or single-pass threshold approximation)
-        final_alphas = _adaptive_resample_alphas(
-            alphas, preview_imgs, request, metric_name, total_frames_saved
-        )
-        # Apply proportional densification only when not using strict K or threshold
-        if not request.target_frames_per_segment and request.threshold is None:
-            final_alphas = _densify_alphas(
-                final_alphas,
-                p1,
-                p2,
-                render_alphas,
-                preview_size,
-                metric_name,
-                None,
-                request,
-                total_frames_saved,
-            )
+    thr = float(request.threshold)
+    final_alphas, _ = _refine_by_threshold_greedy_split(
+        alphas,
+        preview_imgs,
+        p1,
+        p2,
+        render_alphas,
+        preview_size,
+        metric_name,
+        thr,
+        int(request.max_depth),
+        request,
+        total_frames_saved,
+    )
 
     # Full-res render
     full_imgs = []
