@@ -43,7 +43,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         self._load_pipelines()
 
     def _calculate_sub_batch_size(
-        self, total_batch_size: int, width: int, height: int
+        self, total_batch_size: int, width: int, height: int, quiet: bool = False
     ) -> int:
         """Calculate optimal sub-batch size based on memory heuristics.
 
@@ -90,13 +90,16 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             1, min(sub_batch_size, 4)
         )  # Never more than 4 per sub-batch for Kandinsky
 
-        print(
-            f"📊 Kandinsky 2.1 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):"
-        )
-        print(
-            f"   Estimated {memory_per_image_gb:.2f}GB per image (Kandinsky is very memory-intensive)"
-        )
-        print(f"   Sub-batch size: {sub_batch_size} (from total {total_batch_size})")
+        if not quiet:
+            print(
+                f"📊 Kandinsky 2.1 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):"
+            )
+            print(
+                f"   Estimated {memory_per_image_gb:.2f}GB per image (Kandinsky is very memory-intensive)"
+            )
+            print(
+                f"   Sub-batch size: {sub_batch_size} (from total {total_batch_size})"
+            )
 
         return sub_batch_size
 
