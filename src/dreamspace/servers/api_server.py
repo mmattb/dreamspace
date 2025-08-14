@@ -659,9 +659,6 @@ def _refine_by_threshold_greedy_split(
             for j in range(1, num_subdivisions + 1):
                 mid_alpha = a0 + (a1 - a0) * j / (num_subdivisions + 1)
                 subdivision_alphas.append(mid_alpha)
-            subdivision_alphas = subdivision_alphas(
-                torch.tensor(0.0), torch.tensor(1.0), subdivision_alphas
-            )
 
             if not subdivision_alphas:
                 continue
