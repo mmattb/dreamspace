@@ -810,9 +810,7 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
 
         # Stack all interpolated embeddings into a batch
         if not quiet:
-            print(
-                f"📦 Batched {len(interpolated_embeddings)} interpolated embeddings, shape: {batch_prompt_embeds.shape}"
-            )
+            print(f"📦 Batched embeddings, shape: {batch_prompt_embeds.shape}")
 
         # Create negative embeddings for classifier-free guidance (use empty prompt)
         negative_embedding = self._extract_text_embeddings("")
