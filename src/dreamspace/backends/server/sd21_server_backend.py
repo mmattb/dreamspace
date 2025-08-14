@@ -804,10 +804,11 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         if not quiet:
             print(f"🔍 Creating {batch_size} interpolation steps at exact alphas")
 
-        interpolated_embeddings = slerp(embedding1, embedding2, alphas)
+        batch_prompt_embeds = slerp(
+            embedding1, embedding2, torch.tensor(alphas).to(embedding1.device)
+        )
 
         # Stack all interpolated embeddings into a batch
-        batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)
         if not quiet:
             print(
                 f"📦 Batched {len(interpolated_embeddings)} interpolated embeddings, shape: {batch_prompt_embeds.shape}"
