@@ -633,7 +633,6 @@ def _resample_prune(
     alphas,
     preview_imgs,
     pairwise_dist,
-    quiet=False,
     preview_size=256,
     factor=0.3,
     quiet=False,
