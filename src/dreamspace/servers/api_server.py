@@ -629,9 +629,17 @@ def _resample_prune(
     preview_imgs,
     quiet=False,
     preview_size=256,
+    factor=0.3,
 ):
-    # TODO: prune pass
-    return alphas, preview_imgs
+    # Prune pass. This is simpler than upsample by far.
+    alphas_out = []
+    imgs_out = []
+    for idx, dist in dists:
+        if dist > threshold * factor:
+            alphas_out.append(alphas[idx])
+            imgs_out.append(preview_imgs[idx])
+
+    return alphas_out, imgs_out
 
 
 def compute_subdivision_count(distance: float, threshold: float) -> int:
