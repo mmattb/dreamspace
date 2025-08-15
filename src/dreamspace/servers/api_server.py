@@ -644,6 +644,7 @@ def _resample_prune(
     while idx < len(dists):
         if idx == 0:
             # Don't remove anchor points.
+            idx = 1
             continue
 
         dist = dists_out[idx]  # This looks forward from current img to next
