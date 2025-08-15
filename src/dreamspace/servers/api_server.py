@@ -689,7 +689,7 @@ def _resample_upsample(
 
         if _subdivision_alphas:
             subdivision_alphas.append(_subdivision_alphas)
-            split_intervals_idxs.append(interval_idx)
+            split_intervals_idxs.append((interval_idx, num_subdivisions))
 
     # There we go. Now we collapse to a single list and dispatch to renderer.
     # This is more complex since we need to unpack it later, but it enables
@@ -707,10 +707,8 @@ def _resample_upsample(
         continue
 
     asi_idx = 0
-    for si_idx, interval_idx in enumerate(split_intervals_idxs):
+    for si_idx, (interval_idx, num_subdivisions) in enumerate(split_intervals_idxs):
         # Now unpack
-
-        num_subdivisions = intervals_to_split[interval_idx]
         cur_sd_alphas = subdivision_alphas[si_idx]
 
         # Insert subdivisions into current sequences
