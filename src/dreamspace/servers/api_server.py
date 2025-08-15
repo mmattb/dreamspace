@@ -604,7 +604,7 @@ def _refine_by_threshold_greedy_split(
         if not dists:
             break
 
-        current_alphas, current_imgs = _resample_prune(
+        dists, current_alphas, current_imgs = _resample_prune(
             dists,
             threshold,
             alphas,
@@ -637,28 +637,37 @@ def _resample_prune(
     factor=0.3,
     quiet=False,
 ):
-    # Prune pass. This is simpler than upsample by far.
-    alphas_out = []
-    imgs_out = []
-    for idx, dist in enumerate(dists[:-1]):
+    dists_out = []
+    alphas_out = [alphas[0]]
+    imgs_out = [preview_imgs[0]]
+    idx = 0
+    while idx < len(dists):
         if idx == 0:
             # Don't remove anchor points.
             continue
 
-        prev_img = preview_imgs[idx - 1]
+        dist = dists_out[idx]  # This looks forward from current img to next
         cur_img = preview_imgs[idx]
-        next_img = preview_imgs[idx + 1]
-        if dist > threshold * factor or (
-            # Don't remove if removal would cause a gap above threshold.
-            pairwise_dist([prev_img, next_img])
-            > threshold * factor
-        ):
+        idx_end = idx + 1
+        if dist < threshold * factor:
+            # Seek forward, removing until we would make a gap larger than threshold.
+            prev_img = imgs_out[-1]
+            next_img = preview_imgs[idx_end]  # The next img we keep
+            rem_dist = pairwise_dist([prev_img, next_img])
+            while rem_dist < threshold:
+                idx_end += 1
+                next_img = preview_imgs[idx_end]
+                rem_dist = pairwise_dist([prev_img, next_img])
+        else:
+            dists_out.append(dist)
             alphas_out.append(alphas[idx])
             imgs_out.append(cur_img)
 
+        idx = idx_end
+
     if not quiet:
         print(f"Pruned {len(alphas)-len(alphas_out)}")
-    return alphas_out, imgs_out
+    return dists_out, alphas_out, imgs_out
 
 
 def compute_subdivision_count(distance: float, threshold: float) -> int:
