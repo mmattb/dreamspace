@@ -640,7 +640,7 @@ def _resample_prune(
     # Prune pass. This is simpler than upsample by far.
     alphas_out = []
     imgs_out = []
-    for idx, dist in dists[:-1]:
+    for idx, dist in enumerate(dists[:-1]):
         if idx == 0:
             # Don't remove anchor points.
             continue
