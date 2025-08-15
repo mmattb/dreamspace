@@ -605,7 +605,12 @@ def _refine_by_threshold_greedy_split(
             break
 
         current_alphas, current_imgs = _resample_prune(
-            dists, threshold, alphas, preview_imgs, preview_size=preview_size
+            dists,
+            threshold,
+            alphas,
+            preview_imgs,
+            pairwise_dist,
+            preview_size=preview_size,
         )
 
         current_alphas, current_imgs = _resample_upsample(
@@ -627,18 +632,33 @@ def _resample_prune(
     threshold,
     alphas,
     preview_imgs,
+    pairwise_dist,
     quiet=False,
     preview_size=256,
     factor=0.3,
+    quiet=False,
 ):
     # Prune pass. This is simpler than upsample by far.
     alphas_out = []
     imgs_out = []
-    for idx, dist in dists:
-        if dist > threshold * factor:
-            alphas_out.append(alphas[idx])
-            imgs_out.append(preview_imgs[idx])
+    for idx, dist in dists[:-1]:
+        if idx == 0:
+            # Don't remove anchor points.
+            continue
 
+        prev_img = preview_imgs[idx - 1]
+        cur_img = preview_imgs[idx]
+        next_img = preview_imgs[idx + 1]
+        if dist > threshold * factor or (
+            # Don't remove if removal would cause a gap above threshold.
+            pairwise_dist([prev_img, next_img])
+            > threshold * factor
+        ):
+            alphas_out.append(alphas[idx])
+            imgs_out.append(cur_img)
+
+    if not quiet:
+        print(f"Pruned {len(alphas)-len(alphas_out)}")
     return alphas_out, imgs_out
 
 
