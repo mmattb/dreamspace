@@ -614,7 +614,14 @@ def _refine_by_threshold_greedy_split(
         )
 
         current_alphas, current_imgs = _resample_upsample(
-            dists, threshold, current_alphas, current_imgs, preview_size=preview_size
+            p1,
+            p2,
+            dists,
+            threshold,
+            current_alphas,
+            current_imgs,
+            render_alphas,
+            preview_size=preview_size,
         )
 
         alphas = current_alphas
@@ -649,7 +656,7 @@ def _resample_prune(
             # Seek forward, removing until we would make a gap larger than threshold.
             prev_img = imgs_out[-1]
             next_img = preview_imgs[idx_end]  # The next img we keep
-            rem_dist = pairwise_dist([prev_img, next_img])
+            rem_dist = pairwise_dist([prev_img, next_img])[0]
             while rem_dist < threshold:
                 idx_end += 1
                 next_img = preview_imgs[idx_end]
@@ -674,14 +681,23 @@ def compute_subdivision_count(distance: float, threshold: float) -> int:
     # For distance = 2*threshold, add 1 subdivision
     # For distance = 4*threshold, add 3 subdivisions, etc.
     ratio = distance / threshold
+    print(
+        "ppppppppppppppppppppppppppppppppppp",
+        distance,
+        threshold,
+        distance / threshold,
+    )
     return max(1, min(64, int(ratio)))  # Cap at 64 subdivisions per interval
 
 
 def _resample_upsample(
+    p1,
+    p2,
     dists,
     threshold,
     alphas,
     preview_imgs,
+    render_alphas,
     quiet=False,
     preview_size=256,
 ):
@@ -693,10 +709,10 @@ def _resample_upsample(
             intervals_to_split.append((i, num_subdivisions))
 
     if not intervals_to_split:
-        return alphas, imgs
+        return alphas, preview_imgs
 
     if not quiet:
-        print(f"Round {rounds}: splitting {len(intervals_to_split)} intervals")
+        print(f"Splitting {len(intervals_to_split)} intervals")
 
     # Process intervals from right to left to maintain indices
     intervals_to_split.sort(reverse=True)  # Process from highest index to lowest
@@ -727,16 +743,12 @@ def _resample_upsample(
     # This is more complex since we need to unpack it later, but it enables
     # parallelized dispatch on the backend.
     all_subdivision_alphas = [i for sublist in subdivision_alphas for i in sublist]
-    try:
-        # Render subdivision images
-        if not quiet:
-            print(f"Dispatching {len(all_subdivision_alphas)} for render.")
-        all_subdivision_imgs = render_alphas(
-            p1, p2, all_subdivision_alphas, preview_size, preview_size, quiet=True
-        )
-    except Exception as e:
-        print(f"Failed to render subdivisions: {e}")
-        continue
+    # Render subdivision images
+    if not quiet:
+        print(f"Dispatching {len(all_subdivision_alphas)} for render.")
+    all_subdivision_imgs = render_alphas(
+        p1, p2, all_subdivision_alphas, preview_size, preview_size, quiet=True
+    )
 
     asi_idx = 0
     for si_idx, (interval_idx, num_subdivisions) in enumerate(split_intervals_idxs):
@@ -912,7 +924,7 @@ def _async_adaptive_multi_prompt_worker(
                 "height": height,
                 "seed": gen_params["seed"],
                 "latent_cookie": gen_params["latent_cookie"],
-                "quiet": quiet,
+                "quiet": False,
             }
 
             # XXX can raise error if this backend doesn't support it.
