@@ -3,7 +3,9 @@
 import math
 import time
 
+from diffusers import KandinskyPipeline, KandinskyPriorPipeline
 import torch
+from torch import nn
 import numpy as np
 from typing import Dict, Any, Optional, List
 from PIL import Image
@@ -11,6 +13,125 @@ from PIL import Image
 from ...core.base import ImgGenBackend
 from ...core.utils import no_grad_method, slerp
 from ...config.settings import Config, ModelConfig
+
+
+def build_kandinsky_unet_inputs(unet, image_embeds):
+    """
+    image_embeds: [B, 768] from the PRIOR (concat neg,pos for CFG => [2B, 768])
+    Returns:
+      encoder_hidden_states: Tensor or Tuple, shaped as unet expects
+      added_cond_kwargs: dict with the right keys
+    """
+    cfg = unet.config
+    B = image_embeds.shape[0]
+    device = image_embeds.device
+    dtype = image_embeds.dtype
+
+    print("addition_embed_type:", getattr(cfg, "addition_embed_type", None))
+    print("encoder_hid_dim_type:", getattr(cfg, "encoder_hid_dim_type", None))
+    print("encoder_hid_dim:", getattr(cfg, "encoder_hid_dim", None))
+    print("cross_attention_dim:", getattr(cfg, "cross_attention_dim", None))
+
+    cross = getattr(cfg, "cross_attention_dim", 768)
+    enc_hid = getattr(cfg, "encoder_hid_dim", cross)
+    enc_type = getattr(cfg, "encoder_hid_dim_type", "text_image_proj")
+    add_type = getattr(cfg, "addition_embed_type", None)
+
+    # 1) The UNet ALWAYS wants added_cond_kwargs with image_embeds when add_type == "image"
+    added = {"image_embeds": image_embeds}
+
+    # 2) Now prepare encoder_hidden_states per variant
+    if enc_type == "text_image_proj":
+        print("tip")
+        # Kandinsky 2.1: UNet will combine a TEXT slot (enc_hid) with image_embeds (768)
+        # Give it a dummy text slot with the *encoder_hid_dim* width (often 1024).
+        ehs = torch.zeros(B, 1, enc_hid, device=device, dtype=dtype)
+
+    elif enc_type == "text_proj":
+        print("tp")
+        # Less common here, but means it expects raw TEXT width first, then it will project to 'cross'.
+        # Make a dummy with width = encoder_hid_dim (or cross if missing).
+        ehs = torch.zeros(B, 1, enc_hid, device=device, dtype=dtype)
+
+    elif enc_type == "image_proj":
+        print("ip")
+        # Newer path: the UNet will *derive* the text slot internally from image_embeds.
+        # You can pass a dummy with width = cross OR even a zero-length; safest is [B,1,cross].
+        ehs = torch.zeros(B, 1, cross, device=device, dtype=dtype)
+
+    else:
+        print("shrug")
+        # Fallback: match cross
+        ehs = torch.zeros(B, 1, cross, device=device, dtype=dtype)
+
+    return ehs, added
+
+
+def freeze_and_eval_pipeline(pipe):
+    """
+    Put *all* nn.Modules inside a diffusers pipeline into eval mode
+    and disable grads. Works for Kandinsky decoder & prior pipelines,
+    SD pipelines, etc.
+    """
+    # Prefer components dict when available (diffusers >=0.16)
+    comps = getattr(pipe, "components", None)
+    if isinstance(comps, dict):
+        for name, m in comps.items():
+            if isinstance(m, nn.Module):
+                m.eval()
+                m.requires_grad_(False)
+        return
+
+    # Fallback: iterate attributes
+    for name, m in vars(pipe).items():
+        if isinstance(m, nn.Module):
+            m.eval()
+            m.requires_grad_(False)
+
+
+def prepare_latents(
+    pipe,
+    batch_size: int,
+    num_channels_latents: int,
+    height: int,
+    width: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    generator: torch.Generator | None = None,
+):
+    """
+    Create initial noise latents for Kandinsky 2.1.
+    Works with VQModel (MoVQ) decoder; no SD-style 0.18215 scaling.
+    """
+    # Downscale factor for latents (MoVQ/VQModel). Usually 8.
+    # Diffusers exposes it on the VQModel config; fall back to 8 if missing.
+    ds = getattr(getattr(pipe, "movq", None), "config", None)
+    scale = getattr(ds, "downsampling_factor", 8)
+
+    latent_h, latent_w = height // scale, width // scale
+
+    # Make sure generator lives on the right device (avoids RNG device mismatch warnings)
+    if (
+        generator is not None
+        and hasattr(generator, "device")
+        and generator.device != device
+    ):
+        # Recreate on correct device while preserving seed state if you want:
+        state = generator.get_state()
+        generator = torch.Generator(device=device)
+        generator.set_state(state)
+
+    latents = torch.randn(
+        (batch_size, num_channels_latents, latent_h, latent_w),
+        dtype=dtype,
+        device=device,
+        generator=generator,
+    )
+
+    # Important: scale by the scheduler's initial noise sigma (same as SD)
+    # Make sure you already called: pipe.scheduler.set_timesteps(num_steps, device=device)
+    latents = latents * pipe.scheduler.init_noise_sigma
+    return latents
 
 
 class Kandinsky21ServerBackend(ImgGenBackend):
@@ -36,6 +157,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         self.config = config or Config()
         self.device = device or "cuda"
         self.model_id = "kandinsky-community/kandinsky-2-1"
+        self.prior_model_id = "kandinsky-community/kandinsky-2-1-prior"
         self.disable_safety_checker = disable_safety_checker
 
         # Latent cache for shared initial latents across batches
@@ -125,57 +247,54 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             self.model_id, **pipeline_kwargs
         )
 
+        # Load prior model + embedder
+        self.prior_pipe = KandinskyPriorPipeline.from_pretrained(
+            self.prior_model_id, **pipeline_kwargs
+        )
+
         # Move pipeline to specified device
         self.pipe = self.pipe.to(self.device)
+        self.prior_pipe = self.prior_pipe.to(self.device)
         print(f"  📍 Text2Image pipeline moved to {self.device}")
 
         # Only enable CPU offload for single GPU setups
         # For multi-GPU, keep models on their assigned GPUs
-        if self.device == "cuda" or self.device == "cuda:0":
-            self.pipe.enable_model_cpu_offload()
-            print(f"  💾 CPU offload enabled for {self.device}")
-        else:
-            print(
-                f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)"
-            )
+        # if self.device == "cuda" or self.device == "cuda:0":
+        #    self.pipe.enable_model_cpu_offload()
+        #    print(f"  💾 CPU offload enabled for {self.device}")
+        # else:
+        #    print(
+        #        f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)"
+        #    )
 
         # Enable memory optimizations - Kandinsky benefits from aggressive memory management
-        try:
-            self.pipe.enable_xformers_memory_efficient_attention()
-            print("✅ XFormers memory optimization enabled")
-        except Exception:
-            print("⚠️ XFormers not available, using default attention")
+        # try:
+        #    self.pipe.enable_xformers_memory_efficient_attention()
+        #    self.prior_pipe.enable_xformers_memory_efficient_attention()
+        #    print("✅ XFormers memory optimization enabled")
+        # except Exception:
+        #    print("⚠️ XFormers not available, using default attention")
 
         # Enable additional memory optimizations for Kandinsky's larger model
         try:
             self.pipe.enable_attention_slicing(
-                1
+                "auto"
+            )  # Slice attention computation for memory efficiency
+            self.prior_pipe.enable_attention_slicing(
+                "auto"
             )  # Slice attention computation for memory efficiency
             print("✅ Attention slicing enabled for Kandinsky 2.1")
         except Exception:
             print("⚠️ Attention slicing not available")
 
-        try:
-            if hasattr(self.pipe, 'movq') and hasattr(self.pipe.movq, "enable_slicing"):
-                self.pipe.movq.enable_slicing()
-                print("✅ MOVQ slicing enabled for Kandinsky 2.1")
-            elif hasattr(self.pipe, 'vae') and hasattr(self.pipe.vae, "enable_slicing"):
-                self.pipe.vae.enable_slicing()
-                print("✅ VAE slicing enabled for Kandinsky 2.1")
-        except Exception:
-            print("⚠️ Image decoder slicing not available")
+        # if hasattr(self.pipe, "movq"):
+        #    self.pipe.movq.enable_slicing()
+        # elif hasattr(self.pipe, "vae"):
+        #    self.pipe.vae.enable_slicing()
 
         # Force all models to eval mode
-        if hasattr(self.pipe, 'unet'):
-            self.pipe.unet.eval()
-        if hasattr(self.pipe, 'movq'):
-            self.pipe.movq.eval()
-        elif hasattr(self.pipe, 'vae'):
-            self.pipe.vae.eval()
-        if hasattr(self.pipe, 'text_encoder'):
-            self.pipe.text_encoder.eval()
-        if hasattr(self.pipe, 'prior'):
-            self.pipe.prior.eval()
+        freeze_and_eval_pipeline(self.pipe)
+        freeze_and_eval_pipeline(self.prior_pipe)
 
         print(f"✅ Kandinsky 2.1 loaded successfully on {self.device}!")
 
@@ -261,19 +380,20 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             else:
                 print(f"🍪 Creating new latent for cookie {latent_cookie}")
                 # Get UNet configuration (with fallbacks for different architectures)
-                if hasattr(self.pipe, 'unet') and hasattr(self.pipe.unet, 'config'):
+                if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
                     num_channels = self.pipe.unet.config.in_channels
                     unet_dtype = self.pipe.unet.dtype
-                elif hasattr(self.pipe, 'prior') and hasattr(self.pipe.prior, 'config'):
+                elif hasattr(self.pipe, "prior") and hasattr(self.pipe.prior, "config"):
                     # Kandinsky might use prior instead of unet
-                    num_channels = getattr(self.pipe.prior.config, 'in_channels', 4)
+                    num_channels = getattr(self.pipe.prior.config, "in_channels", 4)
                     unet_dtype = self.pipe.prior.dtype
                 else:
                     # Fallback defaults
                     num_channels = 4
                     unet_dtype = torch.float16
-                
-                latents = self.pipe.prepare_latents(
+
+                latents = prepare_latents(
+                    self.pipe,
                     batch_size=1,
                     num_channels_latents=num_channels,
                     height=height,
@@ -287,19 +407,20 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         else:
             # No caching - generate fresh latent each time
             # Get UNet configuration (with fallbacks for different architectures)
-            if hasattr(self.pipe, 'unet') and hasattr(self.pipe.unet, 'config'):
+            if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
                 num_channels = self.pipe.unet.config.in_channels
                 unet_dtype = self.pipe.unet.dtype
-            elif hasattr(self.pipe, 'prior') and hasattr(self.pipe.prior, 'config'):
+            elif hasattr(self.pipe, "prior") and hasattr(self.pipe.prior, "config"):
                 # Kandinsky might use prior instead of unet
-                num_channels = getattr(self.pipe.prior.config, 'in_channels', 4)
+                num_channels = getattr(self.pipe.prior.config, "in_channels", 4)
                 unet_dtype = self.pipe.prior.dtype
             else:
                 # Fallback defaults
                 num_channels = 4
                 unet_dtype = torch.float16
-                
-            latents = self.pipe.prepare_latents(
+
+            latents = prepare_latents(
+                self.pipe,
                 batch_size=1,
                 num_channels_latents=num_channels,
                 height=height,
@@ -328,13 +449,18 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
             # Use pipeline's denoising if available, otherwise try direct unet access
-            if hasattr(self.pipe, 'unet') and self.pipe.unet is not None:
+            if hasattr(self.pipe, "unet") and self.pipe.unet is not None:
                 noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=prompt_embeds
+                    latent_input,
+                    t,
+                    encoder_hidden_states=batch_combined_embeds,
+                    added_cond_kwargs={"image_embeds": batch_combined_embeds},
                 ).sample
             else:
                 # Kandinsky may not have direct UNet access - this needs custom handling
-                raise NotImplementedError("Direct UNet access not available for this pipeline type")
+                raise NotImplementedError(
+                    "Direct UNet access not available for this pipeline type"
+                )
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (
@@ -380,7 +506,10 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
             noise_pred = self.pipe.unet(
-                latent_input, t, encoder_hidden_states=batch_prompt_embeds
+                latent_input,
+                t,
+                encoder_hidden_states=batch_combined_embeds,
+                added_cond_kwargs={"image_embeds": batch_combined_embeds},
             ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -403,13 +532,13 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Step 7: Decode the batch of latents to images
         decode_start = time.time()
         # Kandinsky uses MOVQ for decoding instead of VAE
-        if hasattr(self.pipe, 'movq'):
+        if hasattr(self.pipe, "movq"):
             # Kandinsky MOVQ decoding
             movq_scale_factor = getattr(self.pipe, "movq_scale_factor", 1.0)
             images = self.pipe.movq.decode(latents_batch / movq_scale_factor).sample
             decode_time = time.time() - decode_start
             print(f"🔮 MOVQ decode completed in {decode_time:.3f}s")
-        elif hasattr(self.pipe, 'vae'):
+        elif hasattr(self.pipe, "vae"):
             # Fallback to VAE if available
             vae_scale_factor = getattr(self.pipe, "vae_scale_factor", 0.18215)
             images = self.pipe.vae.decode(latents_batch / vae_scale_factor).sample
@@ -432,9 +561,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             print(
                 f"🎨 Total image decoding (tensor format) completed in {decode_time:.3f}s"
             )
-            print(
-                f"   🔮 Image decode: {decode_time:.3f}s ({100:.1f}%)"
-            )
+            print(f"   🔮 Image decode: {decode_time:.3f}s ({100:.1f}%)")
             print(
                 f"   ⚡ Tensor normalization: {normalize_time:.3f}s ({normalize_time/decode_time*100:.1f}%)"
             )
@@ -501,7 +628,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 "device": str(images.device),
                 "dtype": str(images.dtype),
                 "latents": latents_batch,
-                "embeddings": self._extract_text_embeddings(prompt),
+                # "embeddings": self._extract_text_embeddings(prompt),
             }
         elif output_format == "pil":
             # Original PIL format (default for backwards compatibility)
@@ -509,7 +636,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 "images": pil_images,  # PIL Images
                 "format": "pil",
                 "latents": latents_batch,
-                "embeddings": self._extract_text_embeddings(prompt),
+                # "embeddings": self._extract_text_embeddings(prompt),
             }
         else:
             # Default to PIL for now, could add other formats later
@@ -517,7 +644,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 "images": pil_images,  # PIL Images
                 "format": "pil",
                 "latents": latents_batch,
-                "embeddings": self._extract_text_embeddings(prompt),
+                # "embeddings": self._extract_text_embeddings(prompt),
             }
 
     @no_grad_method
@@ -562,8 +689,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
         # Encode prompts once
         encode_start = time.time()
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
+        embedding1, _ = self._extract_text_embeddings(prompt1)
+        embedding2, _ = self._extract_text_embeddings(prompt2)
+        print("hellos2Yn", len(embedding1), len(embedding2))
         if embedding1 is None or embedding2 is None:
             raise ValueError("Failed to extract text embeddings from prompts")
 
@@ -669,8 +797,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         encode_start = time.time()
 
         # Extract embeddings for both prompts
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
+        embedding1, _ = self._extract_text_embeddings(prompt1)
+        embedding2, _ = self._extract_text_embeddings(prompt2)
+        print("hellos33", embedding1.shape, embedding2.shape)
 
         if embedding1 is None or embedding2 is None:
             raise ValueError("Failed to extract text embeddings from prompts")
@@ -744,8 +873,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
 
         # Build negative embeddings for classifier-free guidance
-        negative_embedding = self._extract_text_embeddings("")
-        batch_negative_embeds = negative_embedding.repeat(batch_size, 1, 1)
+        negative_embedding, _ = self._extract_text_embeddings("")
+        batch_negative_embeds = negative_embedding.repeat(batch_size, 1)
+        print(batch_negative_embeds.shape, batch_prompt_embeds.shape, "asdfasdfas")
         batch_combined_embeds = torch.cat(
             [batch_negative_embeds, batch_prompt_embeds], dim=0
         )
@@ -757,19 +887,20 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 single_latent = self.latent_cache[latent_key].clone()
             else:
                 # Get UNet configuration (with fallbacks for different architectures)
-                if hasattr(self.pipe, 'unet') and hasattr(self.pipe.unet, 'config'):
+                if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
                     num_channels = self.pipe.unet.config.in_channels
                     unet_dtype = self.pipe.unet.dtype
-                elif hasattr(self.pipe, 'prior') and hasattr(self.pipe.prior, 'config'):
+                elif hasattr(self.pipe, "prior") and hasattr(self.pipe.prior, "config"):
                     # Kandinsky might use prior instead of unet
-                    num_channels = getattr(self.pipe.prior.config, 'in_channels', 4)
+                    num_channels = getattr(self.pipe.prior.config, "in_channels", 4)
                     unet_dtype = self.pipe.prior.dtype
                 else:
                     # Fallback defaults
                     num_channels = 4
                     unet_dtype = torch.float16
-                    
-                single_latent = self.pipe.prepare_latents(
+
+                single_latent = prepare_latents(
+                    self.pipe,
                     batch_size=1,
                     num_channels_latents=num_channels,
                     height=height,
@@ -781,19 +912,20 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 self.latent_cache[latent_key] = single_latent.clone()
         else:
             # Get UNet configuration (with fallbacks for different architectures)
-            if hasattr(self.pipe, 'unet') and hasattr(self.pipe.unet, 'config'):
+            if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
                 num_channels = self.pipe.unet.config.in_channels
                 unet_dtype = self.pipe.unet.dtype
-            elif hasattr(self.pipe, 'prior') and hasattr(self.pipe.prior, 'config'):
+            elif hasattr(self.pipe, "prior") and hasattr(self.pipe.prior, "config"):
                 # Kandinsky might use prior instead of unet
-                num_channels = getattr(self.pipe.prior.config, 'in_channels', 4)
+                num_channels = getattr(self.pipe.prior.config, "in_channels", 4)
                 unet_dtype = self.pipe.prior.dtype
             else:
                 # Fallback defaults
                 num_channels = 4
                 unet_dtype = torch.float16
-                
-            single_latent = self.pipe.prepare_latents(
+
+            single_latent = prepare_latents(
+                self.pipe,
                 batch_size=1,
                 num_channels_latents=num_channels,
                 height=height,
@@ -832,7 +964,10 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                         latent_input, t
                     )
                     noise_pred = self.pipe.unet(
-                        latent_input, t, encoder_hidden_states=sub_combined
+                        latent_input,
+                        t,
+                        encoder_hidden_states=sub_combined,
+                        added_cond_kwargs={"image_embeds": sub_combined},
                     ).sample
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (
@@ -851,8 +986,34 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             for t in self.pipe.scheduler.timesteps:
                 latent_input = torch.cat([latents] * 2)
                 latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
+
+                # print("------", latent_input.shape, batch_combined_embeds.shape)
+                # print(dir(self.pipe))
+                # print(dir(self.pipe.unet))
+                # print(type(self.pipe.unet.add_embedding))
+                # batch_size = batch_combined_embeds.shape[0]
+                # dtype = batch_combined_embeds.dtype
+                # device = batch_combined_embeds.device
+                # cross_dim = getattr(
+                #    self.pipe.unet.config, "cross_attention_dim", None
+                # )  # e.g. 768
+                # enc_hid_dim = getattr(
+                #    self.pipe.unet.config, "encoder_hid_dim", cross_dim
+                # )  # e.g. 1024 on KD 2.1
+                # encoder_hidden_states = torch.zeros(
+                #    batch_size, 1, enc_hid_dim, device=device, dtype=dtype
+                # )
+                encoder_hidden_states, adds = build_kandinsky_unet_inputs(
+                    self.pipe.unet, batch_combined_embeds
+                )
+                print(
+                    "??????", batch_combined_embeds.shape, encoder_hidden_states.shape
+                )
                 noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=batch_combined_embeds
+                    latent_input,
+                    t,
+                    encoder_hidden_states=encoder_hidden_states,
+                    added_cond_kwargs={"image_embeds": batch_combined_embeds},
                 ).sample
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (
@@ -877,12 +1038,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             decoded_chunks = []
             for i in range(0, batch_size, decode_batch):
                 chunk = final_latents[i : i + decode_batch]
-                if hasattr(self.pipe, 'movq'):
+                if hasattr(self.pipe, "movq"):
                     # Kandinsky MOVQ decoding
-                    movq_scale_factor = getattr(self.pipe.movq.config, 'scaling_factor', 1.0)
+                    movq_scale_factor = getattr(
+                        self.pipe.movq.config, "scaling_factor", 1.0
+                    )
                     chunk = 1 / movq_scale_factor * chunk
                     decoded = self.pipe.movq.decode(chunk).sample
-                elif hasattr(self.pipe, 'vae'):
+                elif hasattr(self.pipe, "vae"):
                     # Fallback to VAE
                     chunk = 1 / self.pipe.vae.config.scaling_factor * chunk
                     decoded = self.pipe.vae.decode(chunk).sample
@@ -896,12 +1059,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             pil_images = []
             for i in range(0, batch_size, decode_batch):
                 chunk = final_latents[i : i + decode_batch]
-                if hasattr(self.pipe, 'movq'):
+                if hasattr(self.pipe, "movq"):
                     # Kandinsky MOVQ decoding
-                    movq_scale_factor = getattr(self.pipe.movq.config, 'scaling_factor', 1.0)
+                    movq_scale_factor = getattr(
+                        self.pipe.movq.config, "scaling_factor", 1.0
+                    )
                     chunk = 1 / movq_scale_factor * chunk
                     decoded = self.pipe.movq.decode(chunk).sample
-                elif hasattr(self.pipe, 'vae'):
+                elif hasattr(self.pipe, "vae"):
                     # Fallback to VAE
                     chunk = 1 / self.pipe.vae.config.scaling_factor * chunk
                     decoded = self.pipe.vae.decode(chunk).sample
@@ -930,109 +1095,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 "latents": final_latents,
                 "embeddings": batch_prompt_embeds,
             }
-
-    @no_grad_method
-    def generate_interpolated_embeddings_at_alphas(
-        self,
-        prompt1: str,
-        prompt2: str,
-        alphas: List[float],
-        output_format: str = "pil",
-        latent_cookie: Optional[int] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Generate images at specific interpolation alpha values between two prompts.
-
-        This refactored version builds embeddings at the provided alphas and delegates to the unified renderer.
-
-        Args:
-            prompt1: The starting text prompt.
-            prompt2: The ending text prompt.
-            alphas: List of interpolation factors (0.0-1.0) where 0.0=prompt1, 1.0=prompt2.
-            output_format: Format of the output images (e.g., "pil", "tensor", "jpeg", "png").
-
-        Returns:
-            A dictionary containing the generated images and metadata.
-        """
-        total_start = time.time()
-        batch_size = len(alphas)
-        print(
-            f"🎯 Starting precise interpolated embedding generation: '{prompt1}' → '{prompt2}' at {batch_size} specific alphas"
-        )
-        print(f"🔢 Alpha values: {alphas}")
-
-        # Setup phase
-        setup_start = time.time()
-
-        # Set default generator for reproducibility on the correct device
-        if "generator" not in kwargs and "seed" in kwargs:
-            seed = kwargs.pop("seed")
-            device = self.device if hasattr(self, "device") else "cuda"
-            kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
-
-        generator = kwargs.get("generator")
-        guidance_scale = kwargs.get(
-            "guidance_scale", 4.0
-        )  # Kandinsky typically uses lower guidance
-        height = kwargs.get("height", 768)  # Kandinsky 2.1 default resolution
-        width = kwargs.get("width", 768)  # Kandinsky 2.1 default resolution
-        num_inference_steps = kwargs.get(
-            "num_inference_steps", 100
-        )  # Kandinsky typically uses more steps
-
-        # Set scheduler timesteps
-        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
-
-        setup_time = time.time() - setup_start
-        print(f"⚙️ Setup completed in {setup_time:.3f}s")
-
-        # Encode both prompts into embeddings properly
-        encode_start = time.time()
-
-        # Extract embeddings for both prompts
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
-
-        if embedding1 is None or embedding2 is None:
-            raise ValueError("Failed to extract text embeddings from prompts")
-
-        # Create interpolated embeddings at exact alphas
-        interpolated_embeddings = []
-        print(f"🔍 Creating {batch_size} interpolation steps at exact alphas: {alphas}")
-
-        for alpha in alphas:
-            # Ensure alpha is in valid range
-            alpha = max(0.0, min(1.0, float(alpha)))
-            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
-            interpolated_embeddings.append(interpolated)
-
-        # Stack all interpolated embeddings into a batch
-        batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)
-        print(
-            f"📦 Batched {len(interpolated_embeddings)} interpolated embeddings, shape: {batch_prompt_embeds.shape}"
-        )
-
-        # Compute encoding time now that embeddings are prepared
-        encode_time = time.time() - encode_start
-
-        # Delegate to unified renderer
-        result = self._render_embeddings_sequence(
-            batch_prompt_embeds,
-            batch_size,
-            output_format,
-            latent_cookie,
-            **kwargs,
-        )
-        # Preserve alphas in response for callers that expect it
-        result["alphas"] = alphas
-
-        total_time = time.time() - total_start
-        print(f"✅ Total interpolated embedding generation time: {total_time:.3f}s")
-        print(f"📊 Timing breakdown:")
-        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
-        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
-
-        return result
 
     def _generate_interpolated_embeddings_at_alphas_with_sub_batching(
         self,
@@ -1095,14 +1157,18 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         guidance_scale = kwargs.get("guidance_scale", 4.0)  # Kandinsky default
         height = kwargs.get("height", 768)  # Kandinsky default
         width = kwargs.get("width", 768)  # Kandinsky default
-        num_inference_steps = kwargs.get("num_inference_steps", 100)  # Kandinsky default
+        num_inference_steps = kwargs.get(
+            "num_inference_steps", 100
+        )  # Kandinsky default
 
         setup_time = time.time() - setup_start
 
         # Extract embeddings once (shared across all sub-batches)
         encode_start = time.time()
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
+        embedding1, _ = self._extract_text_embeddings(prompt1)
+        embedding2, _ = self._extract_text_embeddings(prompt2)
+
+        print("hellos", embedding1.shape, embedding2.shape)
 
         if embedding1 is None or embedding2 is None:
             raise ValueError("Failed to extract text embeddings from prompts")
@@ -1129,7 +1195,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             end_idx = min(start_idx + sub_batch_size, total_batch_size)
             current_batch_size = end_idx - start_idx
 
-            print(f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(total_batch_size/sub_batch_size)}: images {start_idx}-{end_idx-1}")
+            print(
+                f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(total_batch_size/sub_batch_size)}: images {start_idx}-{end_idx-1}"
+            )
 
             # Get sub-batch embeddings
             sub_batch_embeddings = interpolated_embeddings[start_idx:end_idx]
@@ -1201,34 +1269,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
     def _extract_text_embeddings(self, prompt: str) -> torch.Tensor:
         """Extract text embeddings from prompt using Kandinsky's text encoder."""
-        try:
-            # Kandinsky may have different tokenizer structure
-            if hasattr(self.pipe, "tokenizer"):
-                text_inputs = self.pipe.tokenizer(
-                    prompt,
-                    padding="max_length",
-                    max_length=self.pipe.tokenizer.model_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-
-                if (
-                    hasattr(self.pipe, "text_encoder")
-                    and self.pipe.text_encoder is not None
-                ):
-                    text_embeddings = self.pipe.text_encoder(
-                        text_inputs.input_ids.to(self.pipe.device)
-                    )[0]
-                else:
-                    # Fallback for different Kandinsky architecture
-                    return None
-
-                return text_embeddings
-            else:
-                # Kandinsky may have different text encoding pipeline
-                return None
-        except Exception:
-            return None
+        # Kandinsky may have different tokenizer structure
+        emb = self.prior_pipe(prompt, num_inference_steps=25, guidance_scale=4.0)
+        return emb.image_embeds, emb.negative_image_embeds
 
     def cleanup(self):
         """Clean up GPU memory."""
