@@ -27,40 +27,54 @@ def build_kandinsky_unet_inputs(unet, image_embeds):
     device = image_embeds.device
     dtype = image_embeds.dtype
 
-    print("addition_embed_type:", getattr(cfg, "addition_embed_type", None))
-    print("encoder_hid_dim_type:", getattr(cfg, "encoder_hid_dim_type", None))
-    print("encoder_hid_dim:", getattr(cfg, "encoder_hid_dim", None))
-    print("cross_attention_dim:", getattr(cfg, "cross_attention_dim", None))
+    # print("addition_embed_type:", getattr(cfg, "addition_embed_type", None))
+    # print("encoder_hid_dim_type:", getattr(cfg, "encoder_hid_dim_type", None))
+    # print("encoder_hid_dim:", getattr(cfg, "encoder_hid_dim", None))
+    # print("cross_attention_dim:", getattr(cfg, "cross_attention_dim", None))
+
+    # print("add.type =", cfg.addition_embed_type)  # text_image
+    # print("proj.type =", cfg.encoder_hid_dim_type)  # text_image_proj
+    # print("enc_hid_dim =", cfg.encoder_hid_dim)  # 1024
+    # print("cross_dim   =", cfg.cross_attention_dim)  # 768
+    # print("need text_embeds width =", unet.add_embedding.text_proj.in_features)  # 768
+    # print("need image_embeds width =", unet.add_embedding.image_proj.in_features)  # 768
 
     cross = getattr(cfg, "cross_attention_dim", 768)
     enc_hid = getattr(cfg, "encoder_hid_dim", cross)
     enc_type = getattr(cfg, "encoder_hid_dim_type", "text_image_proj")
     add_type = getattr(cfg, "addition_embed_type", None)
 
+    text_embeds = torch.zeros(B, cross, device=device, dtype=dtype)
+
     # 1) The UNet ALWAYS wants added_cond_kwargs with image_embeds when add_type == "image"
-    added = {"image_embeds": image_embeds}
+    added = {
+        "image_embeds": image_embeds,
+        "text_embeds": text_embeds,
+    }
+
+    # print(text_embeds.shape, "yyyyyyyyyyyyyyyyyyyy")
 
     # 2) Now prepare encoder_hidden_states per variant
     if enc_type == "text_image_proj":
-        print("tip")
+        # print("tip")
         # Kandinsky 2.1: UNet will combine a TEXT slot (enc_hid) with image_embeds (768)
         # Give it a dummy text slot with the *encoder_hid_dim* width (often 1024).
         ehs = torch.zeros(B, 1, enc_hid, device=device, dtype=dtype)
 
     elif enc_type == "text_proj":
-        print("tp")
+        # print("tp")
         # Less common here, but means it expects raw TEXT width first, then it will project to 'cross'.
         # Make a dummy with width = encoder_hid_dim (or cross if missing).
         ehs = torch.zeros(B, 1, enc_hid, device=device, dtype=dtype)
 
     elif enc_type == "image_proj":
-        print("ip")
+        # print("ip")
         # Newer path: the UNet will *derive* the text slot internally from image_embeds.
         # You can pass a dummy with width = cross OR even a zero-length; safest is [B,1,cross].
         ehs = torch.zeros(B, 1, cross, device=device, dtype=dtype)
 
     else:
-        print("shrug")
+        # print("shrug")
         # Fallback: match cross
         ehs = torch.zeros(B, 1, cross, device=device, dtype=dtype)
 
@@ -450,11 +464,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
             # Use pipeline's denoising if available, otherwise try direct unet access
             if hasattr(self.pipe, "unet") and self.pipe.unet is not None:
+                encoder_hidden_states, adds = build_kandinsky_unet_inputs(
+                    self.pipe.unet, batch_combined_embeds
+                )
                 noise_pred = self.pipe.unet(
                     latent_input,
                     t,
-                    encoder_hidden_states=batch_combined_embeds,
-                    added_cond_kwargs={"image_embeds": batch_combined_embeds},
+                    encoder_hidden_states=encoder_hidden_states,
+                    added_cond_kwargs=adds,
                 ).sample
             else:
                 # Kandinsky may not have direct UNet access - this needs custom handling
@@ -505,11 +522,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_input = torch.cat([latents_batch] * 2)
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
+            encoder_hidden_states, adds = build_kandinsky_unet_inputs(
+                self.pipe.unet, batch_combined_embeds
+            )
             noise_pred = self.pipe.unet(
                 latent_input,
                 t,
-                encoder_hidden_states=batch_combined_embeds,
-                added_cond_kwargs={"image_embeds": batch_combined_embeds},
+                encoder_hidden_states=encoder_hidden_states,
+                added_cond_kwargs=adds,
             ).sample
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -963,11 +983,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     latent_input = self.pipe.scheduler.scale_model_input(
                         latent_input, t
                     )
+                    encoder_hidden_states, adds = build_kandinsky_unet_inputs(
+                        self.pipe.unet, sub_combined
+                    )
                     noise_pred = self.pipe.unet(
                         latent_input,
                         t,
-                        encoder_hidden_states=sub_combined,
-                        added_cond_kwargs={"image_embeds": sub_combined},
+                        encoder_hidden_states=encoder_hidden_states,
+                        added_cond_kwargs=adds,
                     ).sample
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (
@@ -987,33 +1010,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 latent_input = torch.cat([latents] * 2)
                 latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
-                # print("------", latent_input.shape, batch_combined_embeds.shape)
-                # print(dir(self.pipe))
-                # print(dir(self.pipe.unet))
-                # print(type(self.pipe.unet.add_embedding))
-                # batch_size = batch_combined_embeds.shape[0]
-                # dtype = batch_combined_embeds.dtype
-                # device = batch_combined_embeds.device
-                # cross_dim = getattr(
-                #    self.pipe.unet.config, "cross_attention_dim", None
-                # )  # e.g. 768
-                # enc_hid_dim = getattr(
-                #    self.pipe.unet.config, "encoder_hid_dim", cross_dim
-                # )  # e.g. 1024 on KD 2.1
-                # encoder_hidden_states = torch.zeros(
-                #    batch_size, 1, enc_hid_dim, device=device, dtype=dtype
-                # )
                 encoder_hidden_states, adds = build_kandinsky_unet_inputs(
                     self.pipe.unet, batch_combined_embeds
-                )
-                print(
-                    "??????", batch_combined_embeds.shape, encoder_hidden_states.shape
                 )
                 noise_pred = self.pipe.unet(
                     latent_input,
                     t,
                     encoder_hidden_states=encoder_hidden_states,
-                    added_cond_kwargs={"image_embeds": batch_combined_embeds},
+                    added_cond_kwargs=adds,
                 ).sample
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (
