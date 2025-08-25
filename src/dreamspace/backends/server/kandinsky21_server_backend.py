@@ -3,6 +3,7 @@
 import math
 import time
 
+from diffusers import AutoPipelineForText2Image
 from diffusers import KandinskyPipeline, KandinskyPriorPipeline
 import torch
 from torch import nn
@@ -242,7 +243,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
     def _load_pipelines(self):
         """Load the diffusion pipelines using AutoPipeline."""
-        from diffusers import AutoPipelineForText2Image
 
         print(f"🔮 Loading Kandinsky 2.1 from {self.model_id} on {self.device}...")
 
@@ -256,10 +256,15 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             pipeline_kwargs["safety_checker"] = None
             pipeline_kwargs["requires_safety_checker"] = False
 
-        # Load text-to-image pipeline
-        self.pipe = AutoPipelineForText2Image.from_pretrained(
-            self.model_id, **pipeline_kwargs
-        )
+        # Load text-to-image pipeline. Prefer explicit KandinskyPipeline when available
+        # because it exposes the prior/decoder embedding kwargs; fall back to AutoPipeline
+        # for compatibility with older installs.
+        try:
+            self.pipe = KandinskyPipeline.from_pretrained(self.model_id, **pipeline_kwargs)
+        except Exception:
+            self.pipe = AutoPipelineForText2Image.from_pretrained(
+                self.model_id, **pipeline_kwargs
+            )
 
         # Load prior model + embedder
         self.prior_pipe = KandinskyPriorPipeline.from_pretrained(
