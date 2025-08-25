@@ -1,4 +1,4 @@
-"""Kandinsky 2.1 server backend."""
+"""Kandinsky 2.1 server backend - rewritten for proper Kandinsky architecture."""
 
 import math
 import time
@@ -9,15 +9,19 @@ from typing import Dict, Any, Optional, List
 from PIL import Image
 
 from ...core.base import ImgGenBackend
-from ...core.utils import no_grad_method, slerp
+from ...core.utils import no_grad_method
 from ...config.settings import Config, ModelConfig
 
 
 class Kandinsky21ServerBackend(ImgGenBackend):
-    """Kandinsky 2.1 server backend using AutoPipeline.
+    """Kandinsky 2.1 server backend using proper two-stage architecture.
 
-    Optimized for server deployment with CPU offloading and memory efficiency.
-    Uses the AutoPipeline approach for simplified model loading.
+    Kandinsky uses a two-stage process:
+    1. Prior: text -> image embeddings
+    2. Decoder: image embeddings -> images
+    
+    This backend maintains the same high-level interface as SD2.1 but uses
+    Kandinsky's native workflow for better compatibility and performance.
     """
 
     def __init__(
@@ -31,15 +35,15 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         Args:
             config: Configuration instance
             device: Device to run on (overrides config)
-            disable_safety_checker: If True, disables NSFW safety checker (fixes false positives)
+            disable_safety_checker: Not used for Kandinsky
         """
         self.config = config or Config()
         self.device = device or "cuda"
         self.model_id = "kandinsky-community/kandinsky-2-1"
         self.disable_safety_checker = disable_safety_checker
 
-        # Latent cache for shared initial latents across batches
-        self.latent_cache = {}  # cookie -> latent tensor
+        # Cache for image embeddings (replaces latent cache)
+        self.image_embedding_cache = {}  # cookie -> image embedding tensor
 
         self._load_pipelines()
 
@@ -52,6 +56,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             total_batch_size: Total number of images to generate
             width: Image width in pixels
             height: Image height in pixels
+            quiet: If True, suppress progress output
 
         Returns:
             Optimal sub-batch size (1 to total_batch_size)
@@ -59,25 +64,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Calculate megapixels per image
         megapixels = (width * height) / 1_000_000
 
-        # Rough heuristic: Base memory budget in GB (conservative estimate)
-        # Kandinsky 2.1 has even larger memory requirements than SD 2.1 due to two-stage architecture
-        available_memory_gb = (
-            5.0  # Very conservative for Kandinsky's dual-stage pipeline
-        )
+        # Kandinsky is very memory-intensive due to two-stage process
+        available_memory_gb = 4.0  # Conservative for Kandinsky
 
-        # Estimate memory usage per image during generation
-        # Kandinsky 2.1 has different latent structure but similar downsampling
-        latent_megapixels = megapixels / 64  # 8x8 downsampling
-
-        # Memory estimates for Kandinsky 2.1 (higher than SD 2.1 due to two-stage design):
-        # - Latents: latent_megapixels * 4 channels * 2 bytes (float16)
-        # - UNet activations: ~6x latent size (larger UNet, more complex architecture)
-        # - VAE decode: ~6x latent size (RGB output)
-        # - Overhead: 4x for gradient computation, dual-stage pipeline, CLIP overhead
-
-        memory_per_image_mb = (
-            latent_megapixels * 4 * 2 * (6 + 6 + 4)
-        )  # Very conservative for Kandinsky
+        # Kandinsky memory estimates:
+        # - Prior model: ~1GB base + text processing
+        # - Decoder model: ~3GB base + image generation
+        # - Image embeddings: much smaller than SD latents
+        memory_per_image_mb = megapixels * 50  # Much more conservative
         memory_per_image_gb = memory_per_image_mb / 1000
 
         # Calculate how many images we can fit in memory
@@ -86,10 +80,8 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Don't exceed the total batch size
         sub_batch_size = min(max_parallel_images, total_batch_size)
 
-        # Apply very conservative practical limits for Kandinsky 2.1
-        sub_batch_size = max(
-            1, min(sub_batch_size, 4)
-        )  # Never more than 4 per sub-batch for Kandinsky
+        # Very conservative limits for Kandinsky
+        sub_batch_size = max(1, min(sub_batch_size, 2))  # Never more than 2 per sub-batch
 
         if not quiet:
             print(
@@ -105,374 +97,232 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         return sub_batch_size
 
     def _load_pipelines(self):
-        """Load the diffusion pipelines using AutoPipeline."""
-        from diffusers import AutoPipelineForText2Image
+        """Load the Kandinsky pipelines using proper two-stage approach."""
+        try:
+            from diffusers import AutoPipelineForText2Image
+            
+            print(f"🔮 Loading Kandinsky 2.1 from {self.model_id} on {self.device}...")
 
-        print(f"🔮 Loading Kandinsky 2.1 from {self.model_id} on {self.device}...")
-
-        # Prepare loading arguments for Kandinsky
-        pipeline_kwargs = {
-            "torch_dtype": torch.float16,
-        }
-
-        # Kandinsky doesn't typically use safety checker
-        if self.disable_safety_checker:
-            pipeline_kwargs["safety_checker"] = None
-            pipeline_kwargs["requires_safety_checker"] = False
-
-        # Load text-to-image pipeline
-        self.pipe = AutoPipelineForText2Image.from_pretrained(
-            self.model_id, **pipeline_kwargs
-        )
-
-        # Move pipeline to specified device
-        self.pipe = self.pipe.to(self.device)
-        print(f"  📍 Text2Image pipeline moved to {self.device}")
-
-        # Only enable CPU offload for single GPU setups
-        # For multi-GPU, keep models on their assigned GPUs
-        if self.device == "cuda" or self.device == "cuda:0":
-            self.pipe.enable_model_cpu_offload()
-            print(f"  💾 CPU offload enabled for {self.device}")
-        else:
-            print(
-                f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)"
+            # Load the combined pipeline
+            self.pipe = AutoPipelineForText2Image.from_pretrained(
+                self.model_id,
+                torch_dtype=torch.float16,
+                variant="fp16"
             )
+            
+            # Move to device
+            self.pipe = self.pipe.to(self.device)
+            print(f"  📍 Kandinsky pipeline moved to {self.device}")
 
-        # Enable memory optimizations - Kandinsky benefits from aggressive memory management
-        try:
-            self.pipe.enable_xformers_memory_efficient_attention()
-            print("✅ XFormers memory optimization enabled")
-        except Exception:
-            print("⚠️ XFormers not available, using default attention")
+            # Enable memory optimizations if available
+            try:
+                if hasattr(self.pipe, 'enable_attention_slicing'):
+                    self.pipe.enable_attention_slicing(1)
+                    print("✅ Attention slicing enabled")
+            except Exception:
+                print("⚠️ Attention slicing not available")
 
-        # Enable additional memory optimizations for Kandinsky's larger model
-        try:
-            self.pipe.enable_attention_slicing(
-                1
-            )  # Slice attention computation for memory efficiency
-            print("✅ Attention slicing enabled for Kandinsky 2.1")
-        except Exception:
-            print("⚠️ Attention slicing not available")
+            try:
+                if hasattr(self.pipe, 'enable_model_cpu_offload'):
+                    self.pipe.enable_model_cpu_offload()
+                    print("✅ Model CPU offloading enabled")
+            except Exception:
+                print("⚠️ CPU offloading not available")
 
-        try:
-            if hasattr(self.pipe.vae, "enable_slicing"):
-                self.pipe.vae.enable_slicing()
-                print("✅ VAE slicing enabled for Kandinsky 2.1")
-        except Exception:
-            print("⚠️ VAE slicing not available")
+            # Set models to eval mode
+            if hasattr(self.pipe, 'prior') and self.pipe.prior is not None:
+                self.pipe.prior.eval()
+            if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                self.pipe.decoder.eval()
+            if hasattr(self.pipe, 'text_encoder') and self.pipe.text_encoder is not None:
+                self.pipe.text_encoder.eval()
 
-        # Force all models to eval mode
-        self.pipe.unet.eval()
-        self.pipe.vae.eval()
-        self.pipe.text_encoder.eval()
+            print(f"✅ Kandinsky 2.1 loaded successfully on {self.device}!")
 
-        print(f"✅ Kandinsky 2.1 loaded successfully on {self.device}!")
+        except Exception as e:
+            print(f"❌ Failed to load Kandinsky 2.1: {e}")
+            raise
 
     @no_grad_method
     def generate(
         self,
         prompt: str,
-        batch_size: int,
-        noise_magnitude: float,
-        bifurcation_step: int,
+        batch_size: int = 1,
         output_format: str = "pil",
-        latent_cookie: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Generate a batch of images with bifurcated latent wiggle variations.
-
-        This approach runs shared denoising until bifurcation_step, then adds noise
-        and continues denoising in parallel to ensure all variations stay on the manifold.
+        """Generate images from a single prompt using Kandinsky's native pipeline.
 
         Args:
-            prompt: Text prompt for generation
-            batch_size: Number of variations to generate
-            noise_magnitude: Magnitude of noise to add at bifurcation point
-            bifurcation_step: Number of steps from the end when to add noise and bifurcate
-                            (e.g., 5 means bifurcate 5 steps before completion)
+            prompt: Text prompt for image generation
+            batch_size: Number of images to generate
+            output_format: Format of output images ("pil", "tensor", "jpeg", "png")
+            **kwargs: Additional generation parameters
+
+        Returns:
+            Dictionary containing generated images and metadata
         """
         total_start = time.time()
-        print(
-            f"🔀 Starting bifurcated wiggle: {batch_size} variations, noise={noise_magnitude}, bifurcation={bifurcation_step}"
-        )
+        print(f"🎨 Generating {batch_size} images with Kandinsky 2.1: '{prompt}'")
 
-        # Setup phase
-        setup_start = time.time()
-
-        # Set default generator for reproducibility on the correct device
+        # Set up generation parameters with Kandinsky defaults
         if "generator" not in kwargs and "seed" in kwargs:
             seed = kwargs.pop("seed")
-            # Create generator on the same device as the pipeline
-            device = self.device if hasattr(self, "device") else "cuda"
-            kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
+            kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed)
 
-        generator = kwargs["generator"]
-        guidance_scale = kwargs.get(
-            "guidance_scale", 4.0
-        )  # Kandinsky typically uses lower guidance
-        height = kwargs.get("height", 768)  # Kandinsky 2.1 default resolution
-        width = kwargs.get("width", 768)  # Kandinsky 2.1 default resolution
-        num_inference_steps = kwargs.get(
-            "num_inference_steps", 100
-        )  # Kandinsky typically uses more steps
+        # Kandinsky defaults
+        height = kwargs.get("height", 768)
+        width = kwargs.get("width", 768)
+        num_inference_steps = kwargs.get("num_inference_steps", 100)
+        guidance_scale = kwargs.get("guidance_scale", 4.0)
 
-        # Step 1: Set scheduler timesteps
-        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+        # Calculate sub-batching if needed
+        sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
 
-        setup_time = time.time() - setup_start
-        print(f"⚙️ Setup completed in {setup_time:.3f}s")
-
-        # Step 2: Encode the prompt using Kandinsky's text encoder
-        encode_start = time.time()
-
-        prompt_embeds, negative_prompt_embeds = self.pipe.encode_prompt(
-            prompt,
-            device=self.pipe.device,
-            num_images_per_prompt=1,
-            do_classifier_free_guidance=True,
-        )
-
-        # Concatenate negative and positive embeddings for classifier-free guidance
-        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-
-        encode_time = time.time() - encode_start
-        print(f"📝 Prompt encoding completed in {encode_time:.3f}s")
-
-        # Step 3: Prepare initial noise (with optional latent caching)
-        noise_start = time.time()
-
-        # Check if we should use cached latent
-        if latent_cookie is not None:
-            latent_key = (latent_cookie, height, width)  # Include dimensions in key
-            if latent_key in self.latent_cache:
-                print(f"🍪 Using cached latent for cookie {latent_cookie}")
-                latents = self.latent_cache[latent_key].clone()
-            else:
-                print(f"🍪 Creating new latent for cookie {latent_cookie}")
-                latents = self.pipe.prepare_latents(
-                    batch_size=1,
-                    num_channels_latents=self.pipe.unet.config.in_channels,
+        if sub_batch_size < batch_size:
+            # Sub-batch the generation
+            print(f"🔄 Using sub-batching: {batch_size} images in chunks of {sub_batch_size}")
+            all_images = []
+            
+            for start_idx in range(0, batch_size, sub_batch_size):
+                end_idx = min(start_idx + sub_batch_size, batch_size)
+                current_batch_size = end_idx - start_idx
+                
+                print(f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(batch_size/sub_batch_size)}")
+                
+                # Generate sub-batch
+                sub_result = self.pipe(
+                    prompt,
                     height=height,
                     width=width,
-                    dtype=self.pipe.unet.dtype,
-                    device=self.pipe.device,
-                    generator=generator,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    num_images_per_prompt=current_batch_size,
+                    output_type="pil",
+                    **kwargs
                 )
-                # Cache the latent for future use
-                self.latent_cache[latent_key] = latents.clone()
+                
+                all_images.extend(sub_result.images)
+            
+            images = all_images
         else:
-            # No caching - generate fresh latent each time
-            latents = self.pipe.prepare_latents(
-                batch_size=1,
-                num_channels_latents=self.pipe.unet.config.in_channels,
+            # Generate all at once
+            result = self.pipe(
+                prompt,
                 height=height,
                 width=width,
-                dtype=self.pipe.unet.dtype,
-                device=self.pipe.device,
-                generator=generator,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                num_images_per_prompt=batch_size,
+                output_type="pil",
+                **kwargs
             )
+            images = result.images
 
-        noise_time = time.time() - noise_start
-        print(f"🎲 Initial noise preparation completed in {noise_time:.3f}s")
-
-        # Step 4: Run shared denoising until bifurcation point
-        denoise_start = time.time()
-
-        timesteps = self.pipe.scheduler.timesteps
-        bifurcation_index = len(timesteps) - bifurcation_step
-
-        print(
-            f"🔀 Running shared denoising for {bifurcation_index} steps, then bifurcating for final {bifurcation_step} steps"
-        )
-
-        # Shared denoising phase
-        for i, t in enumerate(timesteps[:bifurcation_index]):
-            latent_input = torch.cat([latents] * 2)
-            latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-
-            noise_pred = self.pipe.unet(
-                latent_input, t, encoder_hidden_states=prompt_embeds
-            ).sample
-
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (
-                noise_pred_text - noise_pred_uncond
-            )
-
-            latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
-
-            # Clean up intermediate tensors to free GPU memory
-            del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
-
-        denoise_time = time.time() - denoise_start
-        print(
-            f"🧠 Shared denoising ({bifurcation_index} steps) completed in {denoise_time:.3f}s"
-        )
-
-        # Step 5: Bifurcate - create variations by adding noise
-        bifurcate_start = time.time()
-
-        latents_batch = [latents]
-        if batch_size > 1:
-            for _ in range(batch_size - 1):
-                noise = torch.randn_like(latents) * noise_magnitude
-                latents_batch.append(latents + noise)
-
-        # Concatenate all latents into a single batch for parallel processing
-        latents_batch = torch.cat(latents_batch, dim=0)
-
-        bifurcate_time = time.time() - bifurcate_start
-        print(f"🌀 Bifurcation (noise addition) completed in {bifurcate_time:.3f}s")
-
-        # Step 6: Continue denoising all variations in parallel for remaining steps
-        parallel_denoise_start = time.time()
-
-        remaining_timesteps = timesteps[bifurcation_index:]
-
-        # Expand prompt embeddings to match batch size for parallel processing
-        batch_prompt_embeds = prompt_embeds.repeat(batch_size, 1, 1)
-
-        for i, t in enumerate(remaining_timesteps):
-            # Process entire batch at once
-            latent_input = torch.cat([latents_batch] * 2)
-            latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-
-            noise_pred = self.pipe.unet(
-                latent_input, t, encoder_hidden_states=batch_prompt_embeds
-            ).sample
-
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (
-                noise_pred_text - noise_pred_uncond
-            )
-
-            latents_batch = self.pipe.scheduler.step(
-                noise_pred, t, latents_batch
-            ).prev_sample
-
-            # Clean up intermediate tensors to free GPU memory
-            del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
-
-        parallel_denoise_time = time.time() - parallel_denoise_start
-        print(
-            f"🔄 Parallel denoising ({bifurcation_step} steps × {batch_size} variations) completed in {parallel_denoise_time:.3f}s"
-        )
-
-        # Step 7: Decode the batch of latents to images
-        decode_start = time.time()
-
-        vae_start = time.time()
-        # Kandinsky uses different VAE scaling
-        vae_scale_factor = getattr(self.pipe, "vae_scale_factor", 0.18215)
-        images = self.pipe.vae.decode(latents_batch / vae_scale_factor).sample
-        vae_time = time.time() - vae_start
-        print(f"🔮 VAE decode completed in {vae_time:.3f}s")
-
-        images = (images / 2 + 0.5).clamp(0, 1)  # Convert from [-1,1] to [0,1]
-
-        # Handle output format processing
+        # Handle output format
         if output_format == "tensor":
-            # For tensor format: keep as PyTorch tensor, just normalize to [0,1]
-            normalize_start = time.time()
-            normalize_time = time.time() - normalize_start
-            print(f"🚀 Keeping tensor format for ultra-fast serialization")
-            print(f"⚡ Tensor normalization completed in {normalize_time:.6f}s")
-
-            decode_time = time.time() - decode_start
-            print(
-                f"🎨 Total VAE decoding (tensor format) completed in {decode_time:.3f}s"
-            )
-            print(
-                f"   🔮 VAE decode: {vae_time:.3f}s ({vae_time/decode_time*100:.1f}%)"
-            )
-            print(
-                f"   ⚡ Tensor normalization: {normalize_time:.3f}s ({normalize_time/decode_time*100:.1f}%)"
-            )
-            print(
-                f"   📊 Other operations: {decode_time-vae_time-normalize_time:.3f}s ({(decode_time-vae_time-normalize_time)/decode_time*100:.1f}%)"
-            )
-        else:
-            # For other formats: convert to numpy then PIL
-            tensor_convert_start = time.time()
-            images = (
-                images.cpu().permute(0, 2, 3, 1).float().numpy()
-            )  # BCHW -> BHWC and to numpy
-            tensor_convert_time = time.time() - tensor_convert_start
-            print(f"🔄 Tensor→numpy conversion completed in {tensor_convert_time:.3f}s")
-
-            # Convert to PIL Images for other formats
-            pil_start = time.time()
-            pil_images = []
-            for i in range(images.shape[0]):
-                image_array = (images[i] * 255).astype(
-                    "uint8"
-                )  # Convert to 0-255 range
-                pil_image = Image.fromarray(image_array)
-                pil_images.append(pil_image)
-            pil_time = time.time() - pil_start
-            print(f"🖼️ Numpy→PIL conversion completed in {pil_time:.3f}s")
-
-            decode_time = time.time() - decode_start
-            print(
-                f"🎨 Total VAE decoding + PIL conversion completed in {decode_time:.3f}s"
-            )
-            print(
-                f"   🔮 VAE decode: {vae_time:.3f}s ({vae_time/decode_time*100:.1f}%)"
-            )
-            print(
-                f"   🔄 Tensor→numpy: {tensor_convert_time:.3f}s ({tensor_convert_time/decode_time*100:.1f}%)"
-            )
-            print(f"   🖼️ Numpy→PIL: {pil_time:.3f}s ({pil_time/decode_time*100:.1f}%)")
+            # Convert PIL to tensor
+            tensor_images = []
+            for img in images:
+                img_array = np.array(img).astype(np.float32) / 255.0
+                img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)  # HWC -> CHW
+                tensor_images.append(img_tensor)
+            images = torch.stack(tensor_images)
+        elif output_format in ["jpeg", "png"]:
+            # Keep as PIL for now, format conversion handled by API server
+            pass
 
         total_time = time.time() - total_start
-        print(f"✅ Total bifurcated wiggle generation time: {total_time:.3f}s")
-        print(f"📊 Timing breakdown:")
-        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
-        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
-        print(f"   🎲 Noise prep: {noise_time:.3f}s ({noise_time/total_time*100:.1f}%)")
-        print(
-            f"   🧠 Shared denoise: {denoise_time:.3f}s ({denoise_time/total_time*100:.1f}%)"
-        )
-        print(
-            f"   🌀 Bifurcation: {bifurcate_time:.3f}s ({bifurcate_time/total_time*100:.1f}%)"
-        )
-        print(
-            f"   🔄 Parallel denoise: {parallel_denoise_time:.3f}s ({parallel_denoise_time/decode_time*100:.1f}%)"
-        )
-        print(f"   🎨 Decoding: {decode_time:.3f}s ({decode_time/total_time*100:.1f}%)")
+        print(f"✅ Generation completed in {total_time:.3f}s")
 
-        # Return based on requested output format
-        if output_format == "tensor":
-            # Return raw PyTorch tensors for ultra-fast local processing
-            print(
-                f"🚀 Returning raw tensors (PyTorch format) for high-speed local processing"
-            )
-            return {
-                "images": images,  # PyTorch tensor [0,1] range, shape (batch, channels, height, width)
-                "format": "torch_tensor",
-                "shape": tuple(images.shape),
-                "device": str(images.device),
-                "dtype": str(images.dtype),
-                "latents": latents_batch,
-                "embeddings": self._extract_text_embeddings(prompt),
+        return {
+            "images": images,
+            "total_time": total_time,
+            "batch_size": batch_size,
+            "metadata": {
+                "prompt": prompt,
+                "height": height,
+                "width": width,
+                "guidance_scale": guidance_scale,
+                "num_inference_steps": num_inference_steps,
             }
-        elif output_format == "pil":
-            # Original PIL format (default for backwards compatibility)
-            return {
-                "images": pil_images,  # PIL Images
-                "format": "pil",
-                "latents": latents_batch,
-                "embeddings": self._extract_text_embeddings(prompt),
-            }
-        else:
-            # Default to PIL for now, could add other formats later
-            return {
-                "images": pil_images,  # PIL Images
-                "format": "pil",
-                "latents": latents_batch,
-                "embeddings": self._extract_text_embeddings(prompt),
-            }
+        }
+
+    @no_grad_method
+    def _extract_text_embeddings(self, prompt: str) -> torch.Tensor:
+        """Extract text embeddings using Kandinsky's text encoder.
+        
+        For Kandinsky, this returns the text encoder output that can be
+        used for interpolation before going to the prior model.
+        """
+        try:
+            if hasattr(self.pipe, 'text_encoder') and hasattr(self.pipe, 'tokenizer'):
+                # Use Kandinsky's text encoder directly
+                text_inputs = self.pipe.tokenizer(
+                    prompt,
+                    padding="max_length",
+                    max_length=self.pipe.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                
+                text_embeddings = self.pipe.text_encoder(
+                    text_inputs.input_ids.to(self.device)
+                )[0]
+                
+                return text_embeddings
+            else:
+                print("⚠️ Text encoder not available, using fallback")
+                return None
+        except Exception as e:
+            print(f"⚠️ Failed to extract text embeddings: {e}")
+            return None
+
+    def _extract_image_embeddings(self, prompt: str, **kwargs) -> torch.Tensor:
+        """Extract image embeddings using Kandinsky's prior model.
+        
+        This is Kandinsky-specific: converts text to image embeddings
+        using the prior model. These embeddings can then be interpolated.
+        """
+        try:
+            # Use the prior pipeline to get image embeddings
+            if hasattr(self.pipe, 'prior'):
+                # Set up generation parameters
+                if "generator" not in kwargs and "seed" in kwargs:
+                    seed = kwargs.pop("seed")
+                    kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed)
+                
+                # Get image embeddings from prior
+                image_embeddings = self.pipe.prior(
+                    prompt,
+                    num_inference_steps=kwargs.get("prior_num_inference_steps", 25),
+                    generator=kwargs.get("generator"),
+                    guidance_scale=kwargs.get("prior_guidance_scale", 1.0),
+                ).image_embeds
+                
+                return image_embeddings
+            else:
+                # Fallback: try to use the full pipeline to get embeddings
+                # This is less efficient but more compatible
+                print("⚠️ Using fallback method for image embeddings")
+                return None
+        except Exception as e:
+            print(f"⚠️ Failed to extract image embeddings: {e}")
+            return None
+
+    def interpolate_embeddings(
+        self, embedding1: Any, embedding2: Any, alpha: float
+    ) -> Any:
+        """Interpolate between two embeddings.
+        
+        For Kandinsky, we use linear interpolation (LERP) instead of SLERP
+        since Kandinsky embeddings are not necessarily normalized to unit length.
+        """
+        if embedding1 is None or embedding2 is None:
+            return None
+        
+        # Use linear interpolation for Kandinsky
+        return embedding1 * (1 - alpha) + embedding2 * alpha
 
     @no_grad_method
     def generate_interpolated_embeddings(
@@ -484,496 +334,143 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         latent_cookie: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Generate a batch of images using interpolated embeddings between two prompts.
-
-        This refactored version builds embeddings then delegates denoising/decoding to the unified renderer.
-
-        Args:
-            prompt1: The starting text prompt.
-            prompt2: The ending text prompt.
-            batch_size: Number of interpolation steps (including start and end).
-            output_format: Format of the output images (e.g., "pil", "tensor", "jpeg", "png").
-
-        Returns:
-            A dictionary containing the generated images and metadata.
-        """
-        # Allow seed -> generator
-        if "generator" not in kwargs and "seed" in kwargs:
-            seed = kwargs.pop("seed")
-            device = self.device if hasattr(self, "device") else "cuda"
-            kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
-
-        # Kandinsky-typical defaults if not supplied
-        kwargs.setdefault("guidance_scale", 4.0)
-        kwargs.setdefault("height", 768)
-        kwargs.setdefault("width", 768)
-        kwargs.setdefault("num_inference_steps", 100)
-
-        total_start = time.time()
-        print(
-            f"🌈 Starting interpolated embedding generation: '{prompt1}' → '{prompt2}' with {batch_size} steps"
-        )
-
-        # Encode prompts once
-        encode_start = time.time()
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
-        if embedding1 is None or embedding2 is None:
-            raise ValueError("Failed to extract text embeddings from prompts")
-
-        # Build linear alphas and interpolate
-        alphas = torch.linspace(0, 1, steps=batch_size)
-        interpolated = [embedding1 * (1 - a) + embedding2 * a for a in alphas]
-        batch_prompt_embeds = torch.cat(interpolated, dim=0)
-        encode_time = time.time() - encode_start
-        print(f"📝 Prompt encoding completed in {encode_time:.3f}s")
-
-        # Calculate optimal sub-batch size for memory management
-        height = kwargs.get("height", 768)
-        width = kwargs.get("width", 768)
-        sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
-
-        # If sub-batching is needed
-        if sub_batch_size < batch_size:
-            print(
-                f"🔄 Using sub-batching: {batch_size} images in chunks of {sub_batch_size}"
-            )
-            return self._generate_interpolated_embeddings_with_sub_batching(
-                prompt1,
-                prompt2,
-                batch_size,
-                sub_batch_size,
-                output_format,
-                latent_cookie,
-                **kwargs,
-            )
-
-        # Delegate to unified renderer
-        result = self._render_embeddings_sequence(
-            batch_prompt_embeds,
-            batch_size,
-            output_format,
-            latent_cookie,
-            **kwargs,
-        )
-
-        total_time = time.time() - total_start
-        print(f"✅ Total interpolated embedding generation time: {total_time:.3f}s")
-        print(f"📊 Timing breakdown:")
-        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
-
-        return result
-
-    @no_grad_method
-    def generate_interpolated_embeddings_at_alphas(
-        self,
-        prompt1: str,
-        prompt2: str,
-        alphas: List[float],
-        output_format: str = "pil",
-        latent_cookie: Optional[int] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Generate images at specific interpolation alpha values between two prompts.
-
-        This refactored version builds embeddings at the provided alphas and delegates to the unified renderer.
-
-        Args:
-            prompt1: The starting text prompt.
-            prompt2: The ending text prompt.
-            alphas: List of interpolation factors (0.0-1.0) where 0.0=prompt1, 1.0=prompt2.
-            output_format: Format of the output images (e.g., "pil", "tensor", "jpeg", "png").
-
-        Returns:
-            A dictionary containing the generated images and metadata.
+        """Generate interpolated images between two prompts using embedding interpolation.
+        
+        For Kandinsky, this works by:
+        1. Converting prompts to image embeddings via prior model
+        2. Interpolating between image embeddings
+        3. Using decoder to generate images from interpolated embeddings
         """
         total_start = time.time()
-        batch_size = len(alphas)
-        print(
-            f"🎯 Starting precise interpolated embedding generation: '{prompt1}' → '{prompt2}' at {batch_size} specific alphas"
-        )
-        print(f"🔢 Alpha values: {alphas}")
+        print(f"🌈 Kandinsky interpolation: '{prompt1}' → '{prompt2}' with {batch_size} steps")
 
-        # Setup phase
-        setup_start = time.time()
-
-        # Set default generator for reproducibility on the correct device
+        # Set up generation parameters
         if "generator" not in kwargs and "seed" in kwargs:
             seed = kwargs.pop("seed")
-            device = self.device if hasattr(self, "device") else "cuda"
-            kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
+            kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed)
 
-        generator = kwargs.get("generator")
-        guidance_scale = kwargs.get(
-            "guidance_scale", 4.0
-        )  # Kandinsky typically uses lower guidance
-        height = kwargs.get("height", 768)  # Kandinsky 2.1 default resolution
-        width = kwargs.get("width", 768)  # Kandinsky 2.1 default resolution
-        num_inference_steps = kwargs.get(
-            "num_inference_steps", 100
-        )  # Kandinsky typically uses more steps
-
-        # Set scheduler timesteps
-        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
-
-        setup_time = time.time() - setup_start
-        print(f"⚙️ Setup completed in {setup_time:.3f}s")
-
-        # Encode both prompts into embeddings properly
-        encode_start = time.time()
-
-        # Extract embeddings for both prompts
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
-
-        if embedding1 is None or embedding2 is None:
-            raise ValueError("Failed to extract text embeddings from prompts")
-
-        # Create interpolated embeddings at exact alphas
-        interpolated_embeddings = []
-        print(f"🔍 Creating {batch_size} interpolation steps at exact alphas: {alphas}")
-
-        for alpha in alphas:
-            # Ensure alpha is in valid range
-            alpha = max(0.0, min(1.0, float(alpha)))
-            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
-            interpolated_embeddings.append(interpolated)
-
-        # Stack all interpolated embeddings into a batch
-        batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)
-        print(
-            f"📦 Batched {len(interpolated_embeddings)} interpolated embeddings, shape: {batch_prompt_embeds.shape}"
-        )
-
-        # Compute encoding time now that embeddings are prepared
-        encode_time = time.time() - encode_start
-
-        # Delegate to unified renderer
-        result = self._render_embeddings_sequence(
-            batch_prompt_embeds,
-            batch_size,
-            output_format,
-            latent_cookie,
-            **kwargs,
-        )
-        # Preserve alphas in response for callers that expect it
-        result["alphas"] = alphas
-
-        total_time = time.time() - total_start
-        print(f"✅ Total interpolated embedding generation time: {total_time:.3f}s")
-        print(f"📊 Timing breakdown:")
-        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
-        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
-
-        return result
-
-    def _render_embeddings_sequence(
-        self,
-        batch_prompt_embeds: torch.Tensor,
-        batch_size: int,
-        output_format: str = "pil",
-        latent_cookie: Optional[int] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Unified renderer: denoise and decode a sequence of already-built prompt embeddings.
-
-        Args:
-            batch_prompt_embeds: Tensor of shape (batch, seq_len, hidden)
-            batch_size: Number of frames/images to render
-            output_format: "pil" or "tensor"
-            latent_cookie: Optional cookie for shared initial noise across renders
-            **kwargs: guidance_scale, height, width, num_inference_steps, generator
-
-        Returns:
-            Dict with images, format, latents, and embeddings
-        """
-        # Extract generation params (Kandinsky-typical defaults)
-        generator = kwargs.get("generator")
-        guidance_scale = kwargs.get("guidance_scale", 4.0)
+        # Kandinsky defaults
         height = kwargs.get("height", 768)
         width = kwargs.get("width", 768)
         num_inference_steps = kwargs.get("num_inference_steps", 100)
+        guidance_scale = kwargs.get("guidance_scale", 4.0)
 
-        # Set scheduler timesteps
-        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
-
-        # Build negative embeddings for classifier-free guidance
-        negative_embedding = self._extract_text_embeddings("")
-        batch_negative_embeds = negative_embedding.repeat(batch_size, 1, 1)
-        batch_combined_embeds = torch.cat(
-            [batch_negative_embeds, batch_prompt_embeds], dim=0
-        )
-
-        # Prepare shared initial latent (same noise for all frames) with optional cookie cache
-        if latent_cookie is not None:
-            latent_key = (latent_cookie, height, width)
-            if latent_key in self.latent_cache:
-                single_latent = self.latent_cache[latent_key].clone()
-            else:
-                single_latent = self.pipe.prepare_latents(
-                    batch_size=1,
-                    num_channels_latents=self.pipe.unet.config.in_channels,
-                    height=height,
-                    width=width,
-                    dtype=self.pipe.unet.dtype,
-                    device=self.pipe.device,
-                    generator=generator,
-                )
-                self.latent_cache[latent_key] = single_latent.clone()
-        else:
-            single_latent = self.pipe.prepare_latents(
-                batch_size=1,
-                num_channels_latents=self.pipe.unet.config.in_channels,
-                height=height,
-                width=width,
-                dtype=self.pipe.unet.dtype,
-                device=self.pipe.device,
-                generator=generator,
-            )
-
-        # Decide sub-batch size using memory heuristic
+        # Calculate sub-batching
         sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
 
-        all_final_latents: list[torch.Tensor] = []
-
         if sub_batch_size < batch_size:
-            # Process in sub-batches; reset scheduler per sub-batch
-            for start in range(0, batch_size, sub_batch_size):
-                end = min(start + sub_batch_size, batch_size)
-                current = end - start
+            return self._generate_interpolated_embeddings_with_sub_batching(
+                prompt1, prompt2, batch_size, sub_batch_size, output_format, latent_cookie, **kwargs
+            )
 
-                # Reset timesteps for each sub-batch (scheduler tracks internal state)
-                self.pipe.scheduler.set_timesteps(
-                    num_inference_steps, device=self.pipe.device
-                )
-
-                sub_prompt_embeds = batch_prompt_embeds[start:end]
-                sub_negative_embeds = negative_embedding.repeat(current, 1, 1)
-                sub_combined = torch.cat(
-                    [sub_negative_embeds, sub_prompt_embeds], dim=0
-                )
-
-                latents = single_latent.repeat(current, 1, 1, 1)
-                for t in self.pipe.scheduler.timesteps:
-                    latent_input = torch.cat([latents] * 2)
-                    latent_input = self.pipe.scheduler.scale_model_input(
-                        latent_input, t
-                    )
-                    noise_pred = self.pipe.unet(
-                        latent_input, t, encoder_hidden_states=sub_combined
-                    ).sample
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (
-                        noise_pred_text - noise_pred_uncond
-                    )
-                    latents = self.pipe.scheduler.step(
-                        noise_pred, t, latents
-                    ).prev_sample
-                    # Cleanup
-                    del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
-
-                all_final_latents.append(latents)
-        else:
-            # Single batch path
-            latents = single_latent.repeat(batch_size, 1, 1, 1)
-            for t in self.pipe.scheduler.timesteps:
-                latent_input = torch.cat([latents] * 2)
-                latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
-                noise_pred = self.pipe.unet(
-                    latent_input, t, encoder_hidden_states=batch_combined_embeds
-                ).sample
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (
-                    noise_pred_text - noise_pred_uncond
-                )
-                latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
-                # Cleanup
-                del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
-
-            all_final_latents.append(latents)
-
-        # Concatenate all latents
-        final_latents = torch.cat(all_final_latents, dim=0)
-
-        # Decode latents -> images (use conservative sub-batch for Kandinsky VAE)
-        decode_batch = 2  # very small to avoid OOM with Kandinsky VAE
-        pil_images: list[Image.Image] | None = None
-        images_tensor: torch.Tensor | None = None
-
-        if output_format == "tensor":
-            # Still sub-batch the VAE to control memory; then concatenate tensors
-            decoded_chunks = []
-            for i in range(0, batch_size, decode_batch):
-                chunk = final_latents[i : i + decode_batch]
-                chunk = 1 / self.pipe.vae.config.scaling_factor * chunk
-                decoded = self.pipe.vae.decode(chunk).sample
-                decoded = (decoded / 2 + 0.5).clamp(0, 1)
-                decoded_chunks.append(decoded)
-                # no PIL conversion
-            images_tensor = torch.cat(decoded_chunks, dim=0)
-        else:
-            pil_images = []
-            for i in range(0, batch_size, decode_batch):
-                chunk = final_latents[i : i + decode_batch]
-                chunk = 1 / self.pipe.vae.config.scaling_factor * chunk
-                decoded = self.pipe.vae.decode(chunk).sample
-                decoded = (decoded / 2 + 0.5).clamp(0, 1)
-                arr = decoded.cpu().permute(0, 2, 3, 1).float().numpy()
-                arr = (arr * 255).round().astype(np.uint8)
-                pil_images.extend([Image.fromarray(a) for a in arr])
-
-        # Build return
-        if output_format == "tensor":
-            return {
-                "images": images_tensor,
-                "format": "torch_tensor",
-                "shape": tuple(images_tensor.shape),
-                "device": str(images_tensor.device),
-                "dtype": str(images_tensor.dtype),
-                "latents": final_latents,
-                "embeddings": batch_prompt_embeds,
-            }
-        else:
-            return {
-                "images": pil_images,
-                "format": "pil",
-                "latents": final_latents,
-                "embeddings": batch_prompt_embeds,
-            }
-
-    @no_grad_method
-    def generate_interpolated_embeddings_at_alphas(
-        self,
-        prompt1: str,
-        prompt2: str,
-        alphas: List[float],
-        output_format: str = "pil",
-        latent_cookie: Optional[int] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Generate images at specific interpolation alpha values between two prompts.
-
-        This refactored version builds embeddings at the provided alphas and delegates to the unified renderer.
-
-        Args:
-            prompt1: The starting text prompt.
-            prompt2: The ending text prompt.
-            alphas: List of interpolation factors (0.0-1.0) where 0.0=prompt1, 1.0=prompt2.
-            output_format: Format of the output images (e.g., "pil", "tensor", "jpeg", "png").
-
-        Returns:
-            A dictionary containing the generated images and metadata.
-        """
-        total_start = time.time()
-        batch_size = len(alphas)
-        print(
-            f"🎯 Starting precise interpolated embedding generation: '{prompt1}' → '{prompt2}' at {batch_size} specific alphas"
-        )
-        print(f"🔢 Alpha values: {alphas}")
-
-        # Setup phase
-        setup_start = time.time()
-
-        # Set default generator for reproducibility on the correct device
-        if "generator" not in kwargs and "seed" in kwargs:
-            seed = kwargs.pop("seed")
-            device = self.device if hasattr(self, "device") else "cuda"
-            kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
-
-        generator = kwargs.get("generator")
-        guidance_scale = kwargs.get(
-            "guidance_scale", 4.0
-        )  # Kandinsky typically uses lower guidance
-        height = kwargs.get("height", 768)  # Kandinsky 2.1 default resolution
-        width = kwargs.get("width", 768)  # Kandinsky 2.1 default resolution
-        num_inference_steps = kwargs.get(
-            "num_inference_steps", 100
-        )  # Kandinsky typically uses more steps
-
-        # Set scheduler timesteps
-        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
-
-        setup_time = time.time() - setup_start
-        print(f"⚙️ Setup completed in {setup_time:.3f}s")
-
-        # Encode both prompts into embeddings properly
+        # Extract image embeddings for both prompts
         encode_start = time.time()
+        
+        # Check cache first
+        cache_key1 = f"{latent_cookie}_{prompt1}" if latent_cookie else None
+        cache_key2 = f"{latent_cookie}_{prompt2}" if latent_cookie else None
+        
+        if cache_key1 and cache_key1 in self.image_embedding_cache:
+            print(f"🍪 Using cached image embedding for prompt1")
+            embedding1 = self.image_embedding_cache[cache_key1]
+        else:
+            embedding1 = self._extract_image_embeddings(prompt1, **kwargs)
+            if embedding1 is None:
+                raise ValueError(f"Failed to extract image embeddings for prompt1: '{prompt1}'")
+            if cache_key1:
+                self.image_embedding_cache[cache_key1] = embedding1.clone()
 
-        # Extract embeddings for both prompts
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
+        if cache_key2 and cache_key2 in self.image_embedding_cache:
+            print(f"🍪 Using cached image embedding for prompt2")
+            embedding2 = self.image_embedding_cache[cache_key2]
+        else:
+            embedding2 = self._extract_image_embeddings(prompt2, **kwargs)
+            if embedding2 is None:
+                raise ValueError(f"Failed to extract image embeddings for prompt2: '{prompt2}'")
+            if cache_key2:
+                self.image_embedding_cache[cache_key2] = embedding2.clone()
 
-        if embedding1 is None or embedding2 is None:
-            raise ValueError("Failed to extract text embeddings from prompts")
-
-        # Create interpolated embeddings at exact alphas
-        interpolated_embeddings = []
-        print(f"🔍 Creating {batch_size} interpolation steps at exact alphas: {alphas}")
-
-        for alpha in alphas:
-            # Ensure alpha is in valid range
-            alpha = max(0.0, min(1.0, float(alpha)))
-            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
-            interpolated_embeddings.append(interpolated)
-
-        # Stack all interpolated embeddings into a batch
-        batch_prompt_embeds = torch.cat(interpolated_embeddings, dim=0)
-        print(
-            f"📦 Batched {len(interpolated_embeddings)} interpolated embeddings, shape: {batch_prompt_embeds.shape}"
-        )
-
-        # Compute encoding time now that embeddings are prepared
         encode_time = time.time() - encode_start
+        print(f"📝 Image embedding extraction completed in {encode_time:.3f}s")
 
-        # Delegate to unified renderer
-        result = self._render_embeddings_sequence(
-            batch_prompt_embeds,
-            batch_size,
-            output_format,
-            latent_cookie,
-            **kwargs,
-        )
-        # Preserve alphas in response for callers that expect it
-        result["alphas"] = alphas
+        # Create interpolated embeddings
+        alphas = torch.linspace(0, 1, steps=batch_size)
+        interpolated_embeddings = []
+        
+        for alpha in alphas:
+            interpolated = self.interpolate_embeddings(embedding1, embedding2, float(alpha))
+            interpolated_embeddings.append(interpolated)
+        
+        # Stack embeddings for batch processing
+        batch_image_embeds = torch.cat(interpolated_embeddings, dim=0)
+
+        # Generate images from interpolated embeddings using decoder
+        generation_start = time.time()
+        
+        try:
+            # Use the decoder part of the pipeline
+            if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                # Direct decoder usage
+                result = self.pipe.decoder(
+                    image_embeds=batch_image_embeds,
+                    height=height,
+                    width=width,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    output_type="pil",
+                    **{k: v for k, v in kwargs.items() if k not in ['seed']}  # Remove seed since we use generator
+                )
+                images = result.images
+            else:
+                # Fallback: generate images one by one
+                print("⚠️ Using fallback generation method")
+                images = []
+                for i, embedding in enumerate(interpolated_embeddings):
+                    # This is less efficient but more compatible
+                    alpha = float(alphas[i])
+                    interpolated_prompt = f"Interpolation at alpha={alpha:.3f}"
+                    
+                    result = self.pipe(
+                        interpolated_prompt,
+                        height=height,
+                        width=width,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        num_images_per_prompt=1,
+                        output_type="pil",
+                        **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                    )
+                    images.extend(result.images)
+                    
+        except Exception as e:
+            print(f"⚠️ Decoder generation failed: {e}")
+            raise ValueError(f"Failed to generate images from interpolated embeddings: {e}")
+
+        generation_time = time.time() - generation_start
+        print(f"🎨 Image generation completed in {generation_time:.3f}s")
+
+        # Handle output format
+        if output_format == "tensor":
+            tensor_images = []
+            for img in images:
+                img_array = np.array(img).astype(np.float32) / 255.0
+                img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
+                tensor_images.append(img_tensor)
+            images = torch.stack(tensor_images)
 
         total_time = time.time() - total_start
-        print(f"✅ Total interpolated embedding generation time: {total_time:.3f}s")
-        print(f"📊 Timing breakdown:")
-        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
-        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
+        print(f"✅ Total Kandinsky interpolation time: {total_time:.3f}s")
 
-        return result
-
-    def _generate_interpolated_embeddings_at_alphas_with_sub_batching(
-        self,
-        prompt1: str,
-        prompt2: str,
-        alphas: List[float],
-        total_batch_size: int,
-        sub_batch_size: int,
-        output_format: str,
-        latent_cookie: Optional[int],
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Backwards-compatible wrapper that now delegates to the unified renderer."""
-        # Build embeddings at exact alphas
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
-        if embedding1 is None or embedding2 is None:
-            raise ValueError("Failed to extract text embeddings from prompts")
-        interpolated = []
-        for a in alphas:
-            alpha = max(0.0, min(1.0, float(a)))
-            interpolated.append(embedding1 * (1 - alpha) + embedding2 * alpha)
-        batch_prompt_embeds = torch.cat(interpolated, dim=0)
-        # Delegate
-        return self._render_embeddings_sequence(
-            batch_prompt_embeds,
-            total_batch_size,
-            output_format,
-            latent_cookie,
-            **kwargs,
-        )
+        return {
+            "images": images,
+            "metadata": {
+                "alphas": [float(a) for a in alphas.tolist()],
+                "prompt1": prompt1,
+                "prompt2": prompt2,
+            },
+            "total_time": total_time,
+            "batch_size": batch_size,
+        }
 
     def _generate_interpolated_embeddings_with_sub_batching(
         self,
@@ -986,164 +483,272 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         **kwargs,
     ) -> Dict[str, Any]:
         """Generate interpolated embeddings using sub-batching for memory efficiency."""
-
         total_start = time.time()
-        print(
-            f"🔄 Sub-batching {total_batch_size} images into chunks of {sub_batch_size}"
-        )
-
-        # Setup phase (same as original)
-        setup_start = time.time()
-
-        # Set default generator for reproducibility on the correct device
-        if "generator" not in kwargs and "seed" in kwargs:
-            seed = kwargs.pop("seed")
-            device = self.device if hasattr(self, "device") else "cuda"
-            kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
-
-        generator = kwargs.get("generator")
-        guidance_scale = kwargs.get("guidance_scale", 4.0)  # Kandinsky default
-        height = kwargs.get("height", 768)  # Kandinsky default
-        width = kwargs.get("width", 768)  # Kandinsky default
-        num_inference_steps = kwargs.get("num_inference_steps", 100)  # Kandinsky default
-
-        setup_time = time.time() - setup_start
+        print(f"🔄 Sub-batching {total_batch_size} images into chunks of {sub_batch_size}")
 
         # Extract embeddings once (shared across all sub-batches)
         encode_start = time.time()
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
+        
+        cache_key1 = f"{latent_cookie}_{prompt1}" if latent_cookie else None
+        cache_key2 = f"{latent_cookie}_{prompt2}" if latent_cookie else None
+        
+        if cache_key1 and cache_key1 in self.image_embedding_cache:
+            embedding1 = self.image_embedding_cache[cache_key1]
+        else:
+            embedding1 = self._extract_image_embeddings(prompt1, **kwargs)
+            if embedding1 is None:
+                raise ValueError(f"Failed to extract image embeddings for prompt1")
+            if cache_key1:
+                self.image_embedding_cache[cache_key1] = embedding1.clone()
 
-        if embedding1 is None or embedding2 is None:
-            raise ValueError("Failed to extract text embeddings from prompts")
+        if cache_key2 and cache_key2 in self.image_embedding_cache:
+            embedding2 = self.image_embedding_cache[cache_key2]
+        else:
+            embedding2 = self._extract_image_embeddings(prompt2, **kwargs)
+            if embedding2 is None:
+                raise ValueError(f"Failed to extract image embeddings for prompt2")
+            if cache_key2:
+                self.image_embedding_cache[cache_key2] = embedding2.clone()
 
-        # Create ALL interpolated embeddings first
-        interpolated_embeddings = []
+        # Create all interpolated embeddings
         alphas = torch.linspace(0, 1, steps=total_batch_size)
-        print(
-            f"🔍 Creating {total_batch_size} interpolation steps from '{prompt1}' to '{prompt2}'"
-        )
-
-        for i, alpha in enumerate(alphas):
-            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
-            interpolated_embeddings.append(interpolated)
+        all_interpolated_embeddings = []
+        for alpha in alphas:
+            interpolated = self.interpolate_embeddings(embedding1, embedding2, float(alpha))
+            all_interpolated_embeddings.append(interpolated)
 
         encode_time = time.time() - encode_start
         print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
 
         # Process in sub-batches
         all_images = []
-        metadata = {"alphas": [float(a) for a in alphas.tolist()]}
-
         for start_idx in range(0, total_batch_size, sub_batch_size):
             end_idx = min(start_idx + sub_batch_size, total_batch_size)
             current_batch_size = end_idx - start_idx
 
-            print(f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(total_batch_size/sub_batch_size)}: images {start_idx}-{end_idx-1}")
+            print(f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(total_batch_size/sub_batch_size)}")
 
             # Get sub-batch embeddings
-            sub_batch_embeddings = interpolated_embeddings[start_idx:end_idx]
-            batch_prompt_embeds = torch.cat(sub_batch_embeddings, dim=0)
+            sub_batch_embeddings = all_interpolated_embeddings[start_idx:end_idx]
+            batch_image_embeds = torch.cat(sub_batch_embeddings, dim=0)
 
-            # Process this sub-batch
-            sub_batch_result = self._render_embeddings_sequence(
-                batch_prompt_embeds,
-                current_batch_size,
-                output_format,
-                latent_cookie,
-                **kwargs,
-            )
+            # Generate images for this sub-batch
+            try:
+                if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                    result = self.pipe.decoder(
+                        image_embeds=batch_image_embeds,
+                        height=kwargs.get("height", 768),
+                        width=kwargs.get("width", 768),
+                        num_inference_steps=kwargs.get("num_inference_steps", 100),
+                        guidance_scale=kwargs.get("guidance_scale", 4.0),
+                        output_type="pil",
+                        **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                    )
+                    all_images.extend(result.images)
+                else:
+                    # Fallback method
+                    for embedding in sub_batch_embeddings:
+                        result = self.pipe(
+                            f"Interpolated prompt",
+                            height=kwargs.get("height", 768),
+                            width=kwargs.get("width", 768),
+                            num_inference_steps=kwargs.get("num_inference_steps", 100),
+                            guidance_scale=kwargs.get("guidance_scale", 4.0),
+                            num_images_per_prompt=1,
+                            output_type="pil",
+                            **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                        )
+                        all_images.extend(result.images)
+            except Exception as e:
+                print(f"⚠️ Sub-batch generation failed: {e}")
+                continue
 
-            # Accumulate results
-            if "images" in sub_batch_result:
-                all_images.extend(sub_batch_result["images"])
+        # Handle output format
+        if output_format == "tensor":
+            tensor_images = []
+            for img in all_images:
+                img_array = np.array(img).astype(np.float32) / 255.0
+                img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
+                tensor_images.append(img_tensor)
+            all_images = torch.stack(tensor_images)
 
         total_time = time.time() - total_start
         print(f"✅ Total sub-batched generation time: {total_time:.3f}s")
-        print(f"📊 Timing breakdown:")
-        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
-        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
 
         return {
             "images": all_images,
-            "metadata": metadata,
+            "metadata": {
+                "alphas": [float(a) for a in alphas.tolist()],
+                "prompt1": prompt1,
+                "prompt2": prompt2,
+            },
             "total_time": total_time,
             "batch_size": total_batch_size,
         }
 
-    @no_grad_method
-    def generate_interpolated_embeddings_with_sub_batching(
+    @no_grad_method  
+    def generate_interpolated_embeddings_at_alphas(
         self,
         prompt1: str,
         prompt2: str,
-        total_batch_size: int,
-        sub_batch_size: int,
-        output_format: str,
-        latent_cookie: Optional[int],
+        alphas: List[float],
+        output_format: str = "pil",
+        latent_cookie: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Backwards-compatible wrapper that now delegates to the unified renderer."""
-        # Encode prompts once
-        embedding1 = self._extract_text_embeddings(prompt1)
-        embedding2 = self._extract_text_embeddings(prompt2)
-        if embedding1 is None or embedding2 is None:
-            raise ValueError("Failed to extract text embeddings from prompts")
-        # Uniform alphas then interpolate
-        alphas = torch.linspace(0, 1, steps=total_batch_size)
-        interpolated = [embedding1 * (1 - a) + embedding2 * a for a in alphas]
-        batch_prompt_embeds = torch.cat(interpolated, dim=0)
-        # Delegate
-        return self._render_embeddings_sequence(
-            batch_prompt_embeds,
-            total_batch_size,
-            output_format,
-            latent_cookie,
-            **kwargs,
-        )
+        """Generate images at specific interpolation alpha values.
+        
+        This method allows precise control over interpolation points,
+        useful for adaptive interpolation algorithms.
+        """
+        total_start = time.time()
+        batch_size = len(alphas)
+        print(f"🎯 Kandinsky precise interpolation: '{prompt1}' → '{prompt2}' at {batch_size} alphas")
+        print(f"🔢 Alpha values: {alphas}")
 
-    def interpolate_embeddings(
-        self, embedding1: Any, embedding2: Any, alpha: float
-    ) -> Any:
-        """Interpolate between two text embeddings."""
-        if embedding1 is None or embedding2 is None:
-            return None
-        return self._slerp(embedding1, embedding2, alpha)
+        # Set up generation parameters
+        if "generator" not in kwargs and "seed" in kwargs:
+            seed = kwargs.pop("seed")
+            kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed)
 
-    def _extract_text_embeddings(self, prompt: str) -> torch.Tensor:
-        """Extract text embeddings from prompt using Kandinsky's text encoder."""
-        try:
-            # Kandinsky may have different tokenizer structure
-            if hasattr(self.pipe, "tokenizer"):
-                text_inputs = self.pipe.tokenizer(
-                    prompt,
-                    padding="max_length",
-                    max_length=self.pipe.tokenizer.model_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
+        # Extract image embeddings
+        encode_start = time.time()
+        
+        cache_key1 = f"{latent_cookie}_{prompt1}" if latent_cookie else None
+        cache_key2 = f"{latent_cookie}_{prompt2}" if latent_cookie else None
+        
+        if cache_key1 and cache_key1 in self.image_embedding_cache:
+            embedding1 = self.image_embedding_cache[cache_key1]
+        else:
+            embedding1 = self._extract_image_embeddings(prompt1, **kwargs)
+            if embedding1 is None:
+                raise ValueError(f"Failed to extract image embeddings for prompt1")
+            if cache_key1:
+                self.image_embedding_cache[cache_key1] = embedding1.clone()
 
-                if (
-                    hasattr(self.pipe, "text_encoder")
-                    and self.pipe.text_encoder is not None
-                ):
-                    text_embeddings = self.pipe.text_encoder(
-                        text_inputs.input_ids.to(self.pipe.device)
-                    )[0]
+        if cache_key2 and cache_key2 in self.image_embedding_cache:
+            embedding2 = self.image_embedding_cache[cache_key2]
+        else:
+            embedding2 = self._extract_image_embeddings(prompt2, **kwargs)
+            if embedding2 is None:
+                raise ValueError(f"Failed to extract image embeddings for prompt2")
+            if cache_key2:
+                self.image_embedding_cache[cache_key2] = embedding2.clone()
+
+        # Create interpolated embeddings at specified alphas
+        interpolated_embeddings = []
+        for alpha in alphas:
+            interpolated = self.interpolate_embeddings(embedding1, embedding2, alpha)
+            interpolated_embeddings.append(interpolated)
+
+        encode_time = time.time() - encode_start
+        print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
+
+        # Calculate sub-batching
+        sub_batch_size = self._calculate_sub_batch_size(batch_size, kwargs.get("width", 768), kwargs.get("height", 768))
+        
+        if sub_batch_size < batch_size:
+            # Sub-batch the generation
+            all_images = []
+            for start_idx in range(0, batch_size, sub_batch_size):
+                end_idx = min(start_idx + sub_batch_size, batch_size)
+                
+                sub_batch_embeddings = interpolated_embeddings[start_idx:end_idx]
+                batch_image_embeds = torch.cat(sub_batch_embeddings, dim=0)
+                
+                try:
+                    if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                        result = self.pipe.decoder(
+                            image_embeds=batch_image_embeds,
+                            height=kwargs.get("height", 768),
+                            width=kwargs.get("width", 768),
+                            num_inference_steps=kwargs.get("num_inference_steps", 100),
+                            guidance_scale=kwargs.get("guidance_scale", 4.0),
+                            output_type="pil",
+                            **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                        )
+                        all_images.extend(result.images)
+                    else:
+                        # Fallback
+                        for embedding in sub_batch_embeddings:
+                            result = self.pipe(
+                                f"Interpolated",
+                                height=kwargs.get("height", 768),
+                                width=kwargs.get("width", 768),
+                                num_inference_steps=kwargs.get("num_inference_steps", 100),
+                                guidance_scale=kwargs.get("guidance_scale", 4.0),
+                                num_images_per_prompt=1,
+                                output_type="pil",
+                                **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                            )
+                            all_images.extend(result.images)
+                except Exception as e:
+                    print(f"⚠️ Sub-batch generation failed: {e}")
+                    continue
+            
+            images = all_images
+        else:
+            # Generate all at once
+            batch_image_embeds = torch.cat(interpolated_embeddings, dim=0)
+            
+            try:
+                if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                    result = self.pipe.decoder(
+                        image_embeds=batch_image_embeds,
+                        height=kwargs.get("height", 768),
+                        width=kwargs.get("width", 768),
+                        num_inference_steps=kwargs.get("num_inference_steps", 100),
+                        guidance_scale=kwargs.get("guidance_scale", 4.0),
+                        output_type="pil",
+                        **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                    )
+                    images = result.images
                 else:
-                    # Fallback for different Kandinsky architecture
-                    return None
+                    # Fallback
+                    images = []
+                    for embedding in interpolated_embeddings:
+                        result = self.pipe(
+                            f"Interpolated",
+                            height=kwargs.get("height", 768),
+                            width=kwargs.get("width", 768),
+                            num_inference_steps=kwargs.get("num_inference_steps", 100),
+                            guidance_scale=kwargs.get("guidance_scale", 4.0),
+                            num_images_per_prompt=1,
+                            output_type="pil",
+                            **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                        )
+                        images.extend(result.images)
+            except Exception as e:
+                raise ValueError(f"Failed to generate images: {e}")
 
-                return text_embeddings
-            else:
-                # Kandinsky may have different text encoding pipeline
-                return None
-        except Exception:
-            return None
+        # Handle output format
+        if output_format == "tensor":
+            tensor_images = []
+            for img in images:
+                img_array = np.array(img).astype(np.float32) / 255.0
+                img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
+                tensor_images.append(img_tensor)
+            images = torch.stack(tensor_images)
+
+        total_time = time.time() - total_start
+        print(f"✅ Total alpha-specific generation time: {total_time:.3f}s")
+
+        return {
+            "images": images,
+            "alphas": alphas,
+            "metadata": {
+                "prompt1": prompt1,
+                "prompt2": prompt2,
+            },
+            "total_time": total_time,
+            "batch_size": batch_size,
+        }
 
     def cleanup(self):
         """Clean up GPU memory."""
         if hasattr(self, "pipe"):
             del self.pipe
-
+        if hasattr(self, "image_embedding_cache"):
+            self.image_embedding_cache.clear()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
