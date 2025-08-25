@@ -1,5 +1,6 @@
 """Kandinsky 2.1 server backend."""
 
+import math
 import time
 
 import torch
@@ -8,7 +9,7 @@ from typing import Dict, Any, Optional, List
 from PIL import Image
 
 from ...core.base import ImgGenBackend
-from ...core.utils import no_grad_method
+from ...core.utils import no_grad_method, slerp
 from ...config.settings import Config, ModelConfig
 
 
@@ -527,6 +528,26 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         encode_time = time.time() - encode_start
         print(f"📝 Prompt encoding completed in {encode_time:.3f}s")
 
+        # Calculate optimal sub-batch size for memory management
+        height = kwargs.get("height", 768)
+        width = kwargs.get("width", 768)
+        sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
+
+        # If sub-batching is needed
+        if sub_batch_size < batch_size:
+            print(
+                f"🔄 Using sub-batching: {batch_size} images in chunks of {sub_batch_size}"
+            )
+            return self._generate_interpolated_embeddings_with_sub_batching(
+                prompt1,
+                prompt2,
+                batch_size,
+                sub_batch_size,
+                output_format,
+                latent_cookie,
+                **kwargs,
+            )
+
         # Delegate to unified renderer
         result = self._render_embeddings_sequence(
             batch_prompt_embeds,
@@ -953,6 +974,102 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_cookie,
             **kwargs,
         )
+
+    def _generate_interpolated_embeddings_with_sub_batching(
+        self,
+        prompt1: str,
+        prompt2: str,
+        total_batch_size: int,
+        sub_batch_size: int,
+        output_format: str,
+        latent_cookie: Optional[int],
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Generate interpolated embeddings using sub-batching for memory efficiency."""
+
+        total_start = time.time()
+        print(
+            f"🔄 Sub-batching {total_batch_size} images into chunks of {sub_batch_size}"
+        )
+
+        # Setup phase (same as original)
+        setup_start = time.time()
+
+        # Set default generator for reproducibility on the correct device
+        if "generator" not in kwargs and "seed" in kwargs:
+            seed = kwargs.pop("seed")
+            device = self.device if hasattr(self, "device") else "cuda"
+            kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
+
+        generator = kwargs.get("generator")
+        guidance_scale = kwargs.get("guidance_scale", 4.0)  # Kandinsky default
+        height = kwargs.get("height", 768)  # Kandinsky default
+        width = kwargs.get("width", 768)  # Kandinsky default
+        num_inference_steps = kwargs.get("num_inference_steps", 100)  # Kandinsky default
+
+        setup_time = time.time() - setup_start
+
+        # Extract embeddings once (shared across all sub-batches)
+        encode_start = time.time()
+        embedding1 = self._extract_text_embeddings(prompt1)
+        embedding2 = self._extract_text_embeddings(prompt2)
+
+        if embedding1 is None or embedding2 is None:
+            raise ValueError("Failed to extract text embeddings from prompts")
+
+        # Create ALL interpolated embeddings first
+        interpolated_embeddings = []
+        alphas = torch.linspace(0, 1, steps=total_batch_size)
+        print(
+            f"🔍 Creating {total_batch_size} interpolation steps from '{prompt1}' to '{prompt2}'"
+        )
+
+        for i, alpha in enumerate(alphas):
+            interpolated = embedding1 * (1 - alpha) + embedding2 * alpha
+            interpolated_embeddings.append(interpolated)
+
+        encode_time = time.time() - encode_start
+        print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
+
+        # Process in sub-batches
+        all_images = []
+        metadata = {"alphas": [float(a) for a in alphas.tolist()]}
+
+        for start_idx in range(0, total_batch_size, sub_batch_size):
+            end_idx = min(start_idx + sub_batch_size, total_batch_size)
+            current_batch_size = end_idx - start_idx
+
+            print(f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(total_batch_size/sub_batch_size)}: images {start_idx}-{end_idx-1}")
+
+            # Get sub-batch embeddings
+            sub_batch_embeddings = interpolated_embeddings[start_idx:end_idx]
+            batch_prompt_embeds = torch.cat(sub_batch_embeddings, dim=0)
+
+            # Process this sub-batch
+            sub_batch_result = self._render_embeddings_sequence(
+                batch_prompt_embeds,
+                current_batch_size,
+                output_format,
+                latent_cookie,
+                **kwargs,
+            )
+
+            # Accumulate results
+            if "images" in sub_batch_result:
+                all_images.extend(sub_batch_result["images"])
+
+        total_time = time.time() - total_start
+        print(f"✅ Total sub-batched generation time: {total_time:.3f}s")
+        print(f"📊 Timing breakdown:")
+        print(f"   ⚙️ Setup: {setup_time:.3f}s ({setup_time/total_time*100:.1f}%)")
+        print(f"   📝 Encoding: {encode_time:.3f}s ({encode_time/total_time*100:.1f}%)")
+
+        return {
+            "images": all_images,
+            "metadata": metadata,
+            "total_time": total_time,
+            "batch_size": total_batch_size,
+        }
 
     @no_grad_method
     def generate_interpolated_embeddings_with_sub_batching(
