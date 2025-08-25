@@ -19,7 +19,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
     Kandinsky uses a two-stage process:
     1. Prior: text -> image embeddings
     2. Decoder: image embeddings -> images
-    
+
     This backend maintains the same high-level interface as SD2.1 but uses
     Kandinsky's native workflow for better compatibility and performance.
     """
@@ -81,7 +81,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         sub_batch_size = min(max_parallel_images, total_batch_size)
 
         # Very conservative limits for Kandinsky
-        sub_batch_size = max(1, min(sub_batch_size, 2))  # Never more than 2 per sub-batch
+        sub_batch_size = max(
+            1, min(sub_batch_size, 2)
+        )  # Never more than 2 per sub-batch
 
         if not quiet:
             print(
@@ -100,41 +102,43 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         """Load the Kandinsky pipelines using proper two-stage approach."""
         try:
             from diffusers import AutoPipelineForText2Image
-            
+
             print(f"🔮 Loading Kandinsky 2.1 from {self.model_id} on {self.device}...")
 
             # Load the combined pipeline
             self.pipe = AutoPipelineForText2Image.from_pretrained(
                 self.model_id,
                 torch_dtype=torch.float16,
-                variant="fp16"
             )
-            
+
             # Move to device
             self.pipe = self.pipe.to(self.device)
             print(f"  📍 Kandinsky pipeline moved to {self.device}")
 
             # Enable memory optimizations if available
             try:
-                if hasattr(self.pipe, 'enable_attention_slicing'):
+                if hasattr(self.pipe, "enable_attention_slicing"):
                     self.pipe.enable_attention_slicing(1)
                     print("✅ Attention slicing enabled")
             except Exception:
                 print("⚠️ Attention slicing not available")
 
             try:
-                if hasattr(self.pipe, 'enable_model_cpu_offload'):
+                if hasattr(self.pipe, "enable_model_cpu_offload"):
                     self.pipe.enable_model_cpu_offload()
                     print("✅ Model CPU offloading enabled")
             except Exception:
                 print("⚠️ CPU offloading not available")
 
             # Set models to eval mode
-            if hasattr(self.pipe, 'prior') and self.pipe.prior is not None:
+            if hasattr(self.pipe, "prior") and self.pipe.prior is not None:
                 self.pipe.prior.eval()
-            if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+            if hasattr(self.pipe, "decoder") and self.pipe.decoder is not None:
                 self.pipe.decoder.eval()
-            if hasattr(self.pipe, 'text_encoder') and self.pipe.text_encoder is not None:
+            if (
+                hasattr(self.pipe, "text_encoder")
+                and self.pipe.text_encoder is not None
+            ):
                 self.pipe.text_encoder.eval()
 
             print(f"✅ Kandinsky 2.1 loaded successfully on {self.device}!")
@@ -181,15 +185,19 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
         if sub_batch_size < batch_size:
             # Sub-batch the generation
-            print(f"🔄 Using sub-batching: {batch_size} images in chunks of {sub_batch_size}")
+            print(
+                f"🔄 Using sub-batching: {batch_size} images in chunks of {sub_batch_size}"
+            )
             all_images = []
-            
+
             for start_idx in range(0, batch_size, sub_batch_size):
                 end_idx = min(start_idx + sub_batch_size, batch_size)
                 current_batch_size = end_idx - start_idx
-                
-                print(f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(batch_size/sub_batch_size)}")
-                
+
+                print(
+                    f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(batch_size/sub_batch_size)}"
+                )
+
                 # Generate sub-batch
                 sub_result = self.pipe(
                     prompt,
@@ -199,11 +207,11 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     guidance_scale=guidance_scale,
                     num_images_per_prompt=current_batch_size,
                     output_type="pil",
-                    **kwargs
+                    **kwargs,
                 )
-                
+
                 all_images.extend(sub_result.images)
-            
+
             images = all_images
         else:
             # Generate all at once
@@ -215,7 +223,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 guidance_scale=guidance_scale,
                 num_images_per_prompt=batch_size,
                 output_type="pil",
-                **kwargs
+                **kwargs,
             )
             images = result.images
 
@@ -245,18 +253,18 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 "width": width,
                 "guidance_scale": guidance_scale,
                 "num_inference_steps": num_inference_steps,
-            }
+            },
         }
 
     @no_grad_method
     def _extract_text_embeddings(self, prompt: str) -> torch.Tensor:
         """Extract text embeddings using Kandinsky's text encoder.
-        
+
         For Kandinsky, this returns the text encoder output that can be
         used for interpolation before going to the prior model.
         """
         try:
-            if hasattr(self.pipe, 'text_encoder') and hasattr(self.pipe, 'tokenizer'):
+            if hasattr(self.pipe, "text_encoder") and hasattr(self.pipe, "tokenizer"):
                 # Use Kandinsky's text encoder directly
                 text_inputs = self.pipe.tokenizer(
                     prompt,
@@ -265,11 +273,11 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     truncation=True,
                     return_tensors="pt",
                 )
-                
+
                 text_embeddings = self.pipe.text_encoder(
                     text_inputs.input_ids.to(self.device)
                 )[0]
-                
+
                 return text_embeddings
             else:
                 print("⚠️ Text encoder not available, using fallback")
@@ -280,18 +288,20 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
     def _extract_image_embeddings(self, prompt: str, **kwargs) -> torch.Tensor:
         """Extract image embeddings using Kandinsky's prior model.
-        
+
         This is Kandinsky-specific: converts text to image embeddings
         using the prior model. These embeddings can then be interpolated.
         """
         try:
             # Use the prior pipeline to get image embeddings
-            if hasattr(self.pipe, 'prior'):
+            if hasattr(self.pipe, "prior"):
                 # Set up generation parameters
                 if "generator" not in kwargs and "seed" in kwargs:
                     seed = kwargs.pop("seed")
-                    kwargs["generator"] = torch.Generator(device=self.device).manual_seed(seed)
-                
+                    kwargs["generator"] = torch.Generator(
+                        device=self.device
+                    ).manual_seed(seed)
+
                 # Get image embeddings from prior
                 image_embeddings = self.pipe.prior(
                     prompt,
@@ -299,7 +309,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     generator=kwargs.get("generator"),
                     guidance_scale=kwargs.get("prior_guidance_scale", 1.0),
                 ).image_embeds
-                
+
                 return image_embeddings
             else:
                 # Fallback: try to use the full pipeline to get embeddings
@@ -314,13 +324,13 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         self, embedding1: Any, embedding2: Any, alpha: float
     ) -> Any:
         """Interpolate between two embeddings.
-        
+
         For Kandinsky, we use linear interpolation (LERP) instead of SLERP
         since Kandinsky embeddings are not necessarily normalized to unit length.
         """
         if embedding1 is None or embedding2 is None:
             return None
-        
+
         # Use linear interpolation for Kandinsky
         return embedding1 * (1 - alpha) + embedding2 * alpha
 
@@ -335,14 +345,16 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         **kwargs,
     ) -> Dict[str, Any]:
         """Generate interpolated images between two prompts using embedding interpolation.
-        
+
         For Kandinsky, this works by:
         1. Converting prompts to image embeddings via prior model
         2. Interpolating between image embeddings
         3. Using decoder to generate images from interpolated embeddings
         """
         total_start = time.time()
-        print(f"🌈 Kandinsky interpolation: '{prompt1}' → '{prompt2}' with {batch_size} steps")
+        print(
+            f"🌈 Kandinsky interpolation: '{prompt1}' → '{prompt2}' with {batch_size} steps"
+        )
 
         # Set up generation parameters
         if "generator" not in kwargs and "seed" in kwargs:
@@ -360,23 +372,31 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
         if sub_batch_size < batch_size:
             return self._generate_interpolated_embeddings_with_sub_batching(
-                prompt1, prompt2, batch_size, sub_batch_size, output_format, latent_cookie, **kwargs
+                prompt1,
+                prompt2,
+                batch_size,
+                sub_batch_size,
+                output_format,
+                latent_cookie,
+                **kwargs,
             )
 
         # Extract image embeddings for both prompts
         encode_start = time.time()
-        
+
         # Check cache first
         cache_key1 = f"{latent_cookie}_{prompt1}" if latent_cookie else None
         cache_key2 = f"{latent_cookie}_{prompt2}" if latent_cookie else None
-        
+
         if cache_key1 and cache_key1 in self.image_embedding_cache:
             print(f"🍪 Using cached image embedding for prompt1")
             embedding1 = self.image_embedding_cache[cache_key1]
         else:
             embedding1 = self._extract_image_embeddings(prompt1, **kwargs)
             if embedding1 is None:
-                raise ValueError(f"Failed to extract image embeddings for prompt1: '{prompt1}'")
+                raise ValueError(
+                    f"Failed to extract image embeddings for prompt1: '{prompt1}'"
+                )
             if cache_key1:
                 self.image_embedding_cache[cache_key1] = embedding1.clone()
 
@@ -386,7 +406,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         else:
             embedding2 = self._extract_image_embeddings(prompt2, **kwargs)
             if embedding2 is None:
-                raise ValueError(f"Failed to extract image embeddings for prompt2: '{prompt2}'")
+                raise ValueError(
+                    f"Failed to extract image embeddings for prompt2: '{prompt2}'"
+                )
             if cache_key2:
                 self.image_embedding_cache[cache_key2] = embedding2.clone()
 
@@ -396,20 +418,22 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Create interpolated embeddings
         alphas = torch.linspace(0, 1, steps=batch_size)
         interpolated_embeddings = []
-        
+
         for alpha in alphas:
-            interpolated = self.interpolate_embeddings(embedding1, embedding2, float(alpha))
+            interpolated = self.interpolate_embeddings(
+                embedding1, embedding2, float(alpha)
+            )
             interpolated_embeddings.append(interpolated)
-        
+
         # Stack embeddings for batch processing
         batch_image_embeds = torch.cat(interpolated_embeddings, dim=0)
 
         # Generate images from interpolated embeddings using decoder
         generation_start = time.time()
-        
+
         try:
             # Use the decoder part of the pipeline
-            if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+            if hasattr(self.pipe, "decoder") and self.pipe.decoder is not None:
                 # Direct decoder usage
                 result = self.pipe.decoder(
                     image_embeds=batch_image_embeds,
@@ -418,7 +442,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     output_type="pil",
-                    **{k: v for k, v in kwargs.items() if k not in ['seed']}  # Remove seed since we use generator
+                    **{
+                        k: v for k, v in kwargs.items() if k not in ["seed"]
+                    },  # Remove seed since we use generator
                 )
                 images = result.images
             else:
@@ -429,7 +455,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     # This is less efficient but more compatible
                     alpha = float(alphas[i])
                     interpolated_prompt = f"Interpolation at alpha={alpha:.3f}"
-                    
+
                     result = self.pipe(
                         interpolated_prompt,
                         height=height,
@@ -438,13 +464,15 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                         guidance_scale=guidance_scale,
                         num_images_per_prompt=1,
                         output_type="pil",
-                        **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                        **{k: v for k, v in kwargs.items() if k not in ["seed"]},
                     )
                     images.extend(result.images)
-                    
+
         except Exception as e:
             print(f"⚠️ Decoder generation failed: {e}")
-            raise ValueError(f"Failed to generate images from interpolated embeddings: {e}")
+            raise ValueError(
+                f"Failed to generate images from interpolated embeddings: {e}"
+            )
 
         generation_time = time.time() - generation_start
         print(f"🎨 Image generation completed in {generation_time:.3f}s")
@@ -484,14 +512,16 @@ class Kandinsky21ServerBackend(ImgGenBackend):
     ) -> Dict[str, Any]:
         """Generate interpolated embeddings using sub-batching for memory efficiency."""
         total_start = time.time()
-        print(f"🔄 Sub-batching {total_batch_size} images into chunks of {sub_batch_size}")
+        print(
+            f"🔄 Sub-batching {total_batch_size} images into chunks of {sub_batch_size}"
+        )
 
         # Extract embeddings once (shared across all sub-batches)
         encode_start = time.time()
-        
+
         cache_key1 = f"{latent_cookie}_{prompt1}" if latent_cookie else None
         cache_key2 = f"{latent_cookie}_{prompt2}" if latent_cookie else None
-        
+
         if cache_key1 and cache_key1 in self.image_embedding_cache:
             embedding1 = self.image_embedding_cache[cache_key1]
         else:
@@ -514,7 +544,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         alphas = torch.linspace(0, 1, steps=total_batch_size)
         all_interpolated_embeddings = []
         for alpha in alphas:
-            interpolated = self.interpolate_embeddings(embedding1, embedding2, float(alpha))
+            interpolated = self.interpolate_embeddings(
+                embedding1, embedding2, float(alpha)
+            )
             all_interpolated_embeddings.append(interpolated)
 
         encode_time = time.time() - encode_start
@@ -526,7 +558,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             end_idx = min(start_idx + sub_batch_size, total_batch_size)
             current_batch_size = end_idx - start_idx
 
-            print(f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(total_batch_size/sub_batch_size)}")
+            print(
+                f"🔄 Processing sub-batch {start_idx//sub_batch_size + 1}/{math.ceil(total_batch_size/sub_batch_size)}"
+            )
 
             # Get sub-batch embeddings
             sub_batch_embeddings = all_interpolated_embeddings[start_idx:end_idx]
@@ -534,7 +568,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
             # Generate images for this sub-batch
             try:
-                if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                if hasattr(self.pipe, "decoder") and self.pipe.decoder is not None:
                     result = self.pipe.decoder(
                         image_embeds=batch_image_embeds,
                         height=kwargs.get("height", 768),
@@ -542,7 +576,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                         num_inference_steps=kwargs.get("num_inference_steps", 100),
                         guidance_scale=kwargs.get("guidance_scale", 4.0),
                         output_type="pil",
-                        **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                        **{k: v for k, v in kwargs.items() if k not in ["seed"]},
                     )
                     all_images.extend(result.images)
                 else:
@@ -556,7 +590,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                             guidance_scale=kwargs.get("guidance_scale", 4.0),
                             num_images_per_prompt=1,
                             output_type="pil",
-                            **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                            **{k: v for k, v in kwargs.items() if k not in ["seed"]},
                         )
                         all_images.extend(result.images)
             except Exception as e:
@@ -586,7 +620,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             "batch_size": total_batch_size,
         }
 
-    @no_grad_method  
+    @no_grad_method
     def generate_interpolated_embeddings_at_alphas(
         self,
         prompt1: str,
@@ -597,13 +631,15 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         **kwargs,
     ) -> Dict[str, Any]:
         """Generate images at specific interpolation alpha values.
-        
+
         This method allows precise control over interpolation points,
         useful for adaptive interpolation algorithms.
         """
         total_start = time.time()
         batch_size = len(alphas)
-        print(f"🎯 Kandinsky precise interpolation: '{prompt1}' → '{prompt2}' at {batch_size} alphas")
+        print(
+            f"🎯 Kandinsky precise interpolation: '{prompt1}' → '{prompt2}' at {batch_size} alphas"
+        )
         print(f"🔢 Alpha values: {alphas}")
 
         # Set up generation parameters
@@ -613,10 +649,10 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
         # Extract image embeddings
         encode_start = time.time()
-        
+
         cache_key1 = f"{latent_cookie}_{prompt1}" if latent_cookie else None
         cache_key2 = f"{latent_cookie}_{prompt2}" if latent_cookie else None
-        
+
         if cache_key1 and cache_key1 in self.image_embedding_cache:
             embedding1 = self.image_embedding_cache[cache_key1]
         else:
@@ -645,19 +681,21 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         print(f"📝 Embedding interpolation completed in {encode_time:.3f}s")
 
         # Calculate sub-batching
-        sub_batch_size = self._calculate_sub_batch_size(batch_size, kwargs.get("width", 768), kwargs.get("height", 768))
-        
+        sub_batch_size = self._calculate_sub_batch_size(
+            batch_size, kwargs.get("width", 768), kwargs.get("height", 768)
+        )
+
         if sub_batch_size < batch_size:
             # Sub-batch the generation
             all_images = []
             for start_idx in range(0, batch_size, sub_batch_size):
                 end_idx = min(start_idx + sub_batch_size, batch_size)
-                
+
                 sub_batch_embeddings = interpolated_embeddings[start_idx:end_idx]
                 batch_image_embeds = torch.cat(sub_batch_embeddings, dim=0)
-                
+
                 try:
-                    if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                    if hasattr(self.pipe, "decoder") and self.pipe.decoder is not None:
                         result = self.pipe.decoder(
                             image_embeds=batch_image_embeds,
                             height=kwargs.get("height", 768),
@@ -665,7 +703,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                             num_inference_steps=kwargs.get("num_inference_steps", 100),
                             guidance_scale=kwargs.get("guidance_scale", 4.0),
                             output_type="pil",
-                            **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                            **{k: v for k, v in kwargs.items() if k not in ["seed"]},
                         )
                         all_images.extend(result.images)
                     else:
@@ -675,24 +713,28 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                                 f"Interpolated",
                                 height=kwargs.get("height", 768),
                                 width=kwargs.get("width", 768),
-                                num_inference_steps=kwargs.get("num_inference_steps", 100),
+                                num_inference_steps=kwargs.get(
+                                    "num_inference_steps", 100
+                                ),
                                 guidance_scale=kwargs.get("guidance_scale", 4.0),
                                 num_images_per_prompt=1,
                                 output_type="pil",
-                                **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                                **{
+                                    k: v for k, v in kwargs.items() if k not in ["seed"]
+                                },
                             )
                             all_images.extend(result.images)
                 except Exception as e:
                     print(f"⚠️ Sub-batch generation failed: {e}")
                     continue
-            
+
             images = all_images
         else:
             # Generate all at once
             batch_image_embeds = torch.cat(interpolated_embeddings, dim=0)
-            
+
             try:
-                if hasattr(self.pipe, 'decoder') and self.pipe.decoder is not None:
+                if hasattr(self.pipe, "decoder") and self.pipe.decoder is not None:
                     result = self.pipe.decoder(
                         image_embeds=batch_image_embeds,
                         height=kwargs.get("height", 768),
@@ -700,7 +742,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                         num_inference_steps=kwargs.get("num_inference_steps", 100),
                         guidance_scale=kwargs.get("guidance_scale", 4.0),
                         output_type="pil",
-                        **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                        **{k: v for k, v in kwargs.items() if k not in ["seed"]},
                     )
                     images = result.images
                 else:
@@ -715,7 +757,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                             guidance_scale=kwargs.get("guidance_scale", 4.0),
                             num_images_per_prompt=1,
                             output_type="pil",
-                            **{k: v for k, v in kwargs.items() if k not in ['seed']}
+                            **{k: v for k, v in kwargs.items() if k not in ["seed"]},
                         )
                         images.extend(result.images)
             except Exception as e:
