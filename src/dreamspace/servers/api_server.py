@@ -629,7 +629,9 @@ def _refine_by_threshold_greedy_split(
         rounds += 1
 
     # Tail prune pass
-    alphas, preview_imgs = _resample_prune(dists, threshold, alphas, preview_imgs)
+    _, alphas, preview_imgs = _resample_prune(
+        dists, threshold, alphas, preview_imgs, pairwise_dist, preview_size=preview_size
+    )
 
     return alphas, preview_imgs
 
@@ -657,10 +659,10 @@ def _resample_prune(
             prev_img = imgs_out[-1]
             next_img = preview_imgs[idx_end]  # The next img we keep
             rem_dist = pairwise_dist([prev_img, next_img])[0]
-            while rem_dist < threshold:
+            while rem_dist < threshold and idx_end < len(preview_imgs - 1):
                 idx_end += 1
                 next_img = preview_imgs[idx_end]
-                rem_dist = pairwise_dist([prev_img, next_img])
+                rem_dist = pairwise_dist([prev_img, next_img])[0]
         else:
             dists_out.append(dist)
             alphas_out.append(alphas[idx])

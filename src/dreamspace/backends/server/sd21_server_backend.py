@@ -89,9 +89,12 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         # Don't exceed the total batch size
         sub_batch_size = min(max_parallel_images, total_batch_size)
 
+        # 1024x1024 x34 is too big
+        # 1024x1024 x24 is fine
+
         # Apply more conservative practical limits for SD 2.1
         sub_batch_size = max(
-            1, min(sub_batch_size, 34)
+            1, min(sub_batch_size, 24)
         )  # Never more than 8 per sub-batch for SD 2.1
 
         if not quiet:
@@ -896,7 +899,9 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
 
             # Predict noise residual
             noise_pred = self.pipe.unet(
-                latent_input, t, encoder_hidden_states=batch_combined_embeds
+                latent_input,
+                t,
+                encoder_hidden_states=batch_combined_embeds.to(latent_input.dtype),
             ).sample
 
             # Perform classifier-free guidance
