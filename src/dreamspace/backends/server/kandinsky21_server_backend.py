@@ -465,7 +465,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             # Use pipeline's denoising if available, otherwise try direct unet access
             if hasattr(self.pipe, "unet") and self.pipe.unet is not None:
                 encoder_hidden_states, adds = build_kandinsky_unet_inputs(
-                    self.pipe.unet, batch_combined_embeds
+                    self.pipe.unet, prompt_embeds
                 )
                 noise_pred = self.pipe.unet(
                     latent_input,
@@ -523,7 +523,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
 
             encoder_hidden_states, adds = build_kandinsky_unet_inputs(
-                self.pipe.unet, batch_combined_embeds
+                self.pipe.unet, batch_prompt_embeds
             )
             noise_pred = self.pipe.unet(
                 latent_input,
@@ -895,10 +895,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Build negative embeddings for classifier-free guidance
         negative_embedding, _ = self._extract_text_embeddings("")
         batch_negative_embeds = negative_embedding.repeat(batch_size, 1)
-        print(batch_negative_embeds.shape, batch_prompt_embeds.shape, "asdfasdfas")
-        batch_combined_embeds = torch.cat(
-            [batch_negative_embeds, batch_prompt_embeds], dim=0
-        )
 
         # Prepare shared initial latent (same noise for all frames) with optional cookie cache
         if latent_cookie is not None:
@@ -910,10 +906,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
                     num_channels = self.pipe.unet.config.in_channels
                     unet_dtype = self.pipe.unet.dtype
-                elif hasattr(self.pipe, "prior") and hasattr(self.pipe.prior, "config"):
-                    # Kandinsky might use prior instead of unet
-                    num_channels = getattr(self.pipe.prior.config, "in_channels", 4)
-                    unet_dtype = self.pipe.prior.dtype
                 else:
                     # Fallback defaults
                     num_channels = 4
@@ -935,10 +927,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
                 num_channels = self.pipe.unet.config.in_channels
                 unet_dtype = self.pipe.unet.dtype
-            elif hasattr(self.pipe, "prior") and hasattr(self.pipe.prior, "config"):
-                # Kandinsky might use prior instead of unet
-                num_channels = getattr(self.pipe.prior.config, "in_channels", 4)
-                unet_dtype = self.pipe.prior.dtype
             else:
                 # Fallback defaults
                 num_channels = 4
@@ -958,130 +946,94 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Decide sub-batch size using memory heuristic
         sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
 
+        all_images: list = []
         all_final_latents: list[torch.Tensor] = []
 
-        if sub_batch_size < batch_size:
-            # Process in sub-batches; reset scheduler per sub-batch
-            for start in range(0, batch_size, sub_batch_size):
-                end = min(start + sub_batch_size, batch_size)
-                current = end - start
+        # We'll call the high-level pipeline per sub-batch, passing in the shared
+        # `single_latent` repeated for the sub-batch and the pre-built embeddings.
+        for start in range(0, batch_size, sub_batch_size):
+            end = min(start + sub_batch_size, batch_size)
+            current = end - start
 
-                # Reset timesteps for each sub-batch (scheduler tracks internal state)
-                self.pipe.scheduler.set_timesteps(
-                    num_inference_steps, device=self.pipe.device
-                )
-
-                sub_prompt_embeds = batch_prompt_embeds[start:end]
+            sub_prompt_embeds = batch_prompt_embeds[start:end]
+            # negative_embedding may have shape [1, seq, dim] or [1, dim]
+            try:
                 sub_negative_embeds = negative_embedding.repeat(current, 1, 1)
-                sub_combined = torch.cat(
-                    [sub_negative_embeds, sub_prompt_embeds], dim=0
+            except Exception:
+                sub_negative_embeds = negative_embedding.repeat(current, 1)
+
+            sub_latents = single_latent.repeat(current, 1, 1, 1)
+
+            # Try to call the pipeline and request latents if supported.
+            out = None
+            try:
+                out = self.pipe(
+                    prompt_embeds=sub_prompt_embeds,
+                    negative_prompt_embeds=sub_negative_embeds,
+                    latents=sub_latents,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    height=height,
+                    width=width,
+                    output_type="pt",
+                    return_dict=True,
+                    return_latents=True,
+                )
+            except TypeError:
+                # Some diffusers versions/pipelines don't accept return_latents
+                out = self.pipe(
+                    prompt_embeds=sub_prompt_embeds,
+                    negative_prompt_embeds=sub_negative_embeds,
+                    latents=sub_latents,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    height=height,
+                    width=width,
+                    output_type="pt",
+                    return_dict=True,
                 )
 
-                latents = single_latent.repeat(current, 1, 1, 1)
-                for t in self.pipe.scheduler.timesteps:
-                    latent_input = torch.cat([latents] * 2)
-                    latent_input = self.pipe.scheduler.scale_model_input(
-                        latent_input, t
-                    )
-                    encoder_hidden_states, adds = build_kandinsky_unet_inputs(
-                        self.pipe.unet, sub_combined
-                    )
-                    noise_pred = self.pipe.unet(
-                        latent_input,
-                        t,
-                        encoder_hidden_states=encoder_hidden_states,
-                        added_cond_kwargs=adds,
-                    ).sample
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (
-                        noise_pred_text - noise_pred_uncond
-                    )
-                    latents = self.pipe.scheduler.step(
-                        noise_pred, t, latents
-                    ).prev_sample
-                    # Cleanup
-                    del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
+            # Extract images (tensor) and latents if provided
+            if hasattr(out, "images"):
+                imgs = out.images
+            elif isinstance(out, dict) and "images" in out:
+                imgs = out["images"]
+            else:
+                # Fallback: assume first positional return is images
+                imgs = out[0]
 
-                all_final_latents.append(latents)
-        else:
-            # Single batch path
-            latents = single_latent.repeat(batch_size, 1, 1, 1)
-            for t in self.pipe.scheduler.timesteps:
-                latent_input = torch.cat([latents] * 2)
-                latent_input = self.pipe.scheduler.scale_model_input(latent_input, t)
+            latents_out = None
+            if hasattr(out, "latents"):
+                latents_out = out.latents
+            elif isinstance(out, dict) and "latents" in out:
+                latents_out = out["latents"]
 
-                encoder_hidden_states, adds = build_kandinsky_unet_inputs(
-                    self.pipe.unet, batch_combined_embeds
-                )
-                noise_pred = self.pipe.unet(
-                    latent_input,
-                    t,
-                    encoder_hidden_states=encoder_hidden_states,
-                    added_cond_kwargs=adds,
-                ).sample
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (
-                    noise_pred_text - noise_pred_uncond
-                )
-                latents = self.pipe.scheduler.step(noise_pred, t, latents).prev_sample
-                # Cleanup
-                del latent_input, noise_pred, noise_pred_uncond, noise_pred_text
+            # Append results
+            all_images.append(imgs)
+            if latents_out is not None:
+                all_final_latents.append(latents_out)
 
-            all_final_latents.append(latents)
-
-        # Concatenate all latents
-        final_latents = torch.cat(all_final_latents, dim=0)
-
-        # Decode latents -> images (use conservative sub-batch for Kandinsky VAE)
-        decode_batch = 2  # very small to avoid OOM with Kandinsky VAE
+        # Concatenate images and latents
+        # Images may be a tensor (output_type='pt') with shape [N, C, H, W]
+        images_tensor = None
         pil_images: list[Image.Image] | None = None
-        images_tensor: torch.Tensor | None = None
+        if len(all_images) > 0:
+            images_tensor = torch.cat(all_images, dim=0)
 
-        if output_format == "tensor":
-            # Still sub-batch the decoder to control memory; then concatenate tensors
-            decoded_chunks = []
-            for i in range(0, batch_size, decode_batch):
-                chunk = final_latents[i : i + decode_batch]
-                if hasattr(self.pipe, "movq"):
-                    # Kandinsky MOVQ decoding
-                    movq_scale_factor = getattr(
-                        self.pipe.movq.config, "scaling_factor", 1.0
-                    )
-                    chunk = 1 / movq_scale_factor * chunk
-                    decoded = self.pipe.movq.decode(chunk).sample
-                elif hasattr(self.pipe, "vae"):
-                    # Fallback to VAE
-                    chunk = 1 / self.pipe.vae.config.scaling_factor * chunk
-                    decoded = self.pipe.vae.decode(chunk).sample
-                else:
-                    raise ValueError("No image decoder found")
-                decoded = (decoded / 2 + 0.5).clamp(0, 1)
-                decoded_chunks.append(decoded)
-                # no PIL conversion
-            images_tensor = torch.cat(decoded_chunks, dim=0)
-        else:
+        final_latents = (
+            torch.cat(all_final_latents, dim=0) if len(all_final_latents) > 0 else None
+        )
+
+        # If the user requested PIL output, convert now
+        if output_format == "pil":
             pil_images = []
-            for i in range(0, batch_size, decode_batch):
-                chunk = final_latents[i : i + decode_batch]
-                if hasattr(self.pipe, "movq"):
-                    # Kandinsky MOVQ decoding
-                    movq_scale_factor = getattr(
-                        self.pipe.movq.config, "scaling_factor", 1.0
-                    )
-                    chunk = 1 / movq_scale_factor * chunk
-                    decoded = self.pipe.movq.decode(chunk).sample
-                elif hasattr(self.pipe, "vae"):
-                    # Fallback to VAE
-                    chunk = 1 / self.pipe.vae.config.scaling_factor * chunk
-                    decoded = self.pipe.vae.decode(chunk).sample
-                else:
-                    raise ValueError("No image decoder found")
-                decoded = (decoded / 2 + 0.5).clamp(0, 1)
-                arr = decoded.cpu().permute(0, 2, 3, 1).float().numpy()
-                arr = (arr * 255).round().astype(np.uint8)
-                pil_images.extend([Image.fromarray(a) for a in arr])
+            arr = images_tensor.cpu().permute(0, 2, 3, 1).float().numpy()
+            arr = (arr * 255).round().astype(np.uint8)
+            pil_images.extend([Image.fromarray(a) for a in arr])
 
-        # Build return
+        # Build return (keep old keys; latents may be None if pipeline didn't return them)
         if output_format == "tensor":
             return {
                 "images": images_tensor,
@@ -1089,15 +1041,11 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 "shape": tuple(images_tensor.shape),
                 "device": str(images_tensor.device),
                 "dtype": str(images_tensor.dtype),
-                "latents": final_latents,
-                "embeddings": batch_prompt_embeds,
             }
         else:
             return {
                 "images": pil_images,
                 "format": "pil",
-                "latents": final_latents,
-                "embeddings": batch_prompt_embeds,
             }
 
     def _generate_interpolated_embeddings_at_alphas_with_sub_batching(
