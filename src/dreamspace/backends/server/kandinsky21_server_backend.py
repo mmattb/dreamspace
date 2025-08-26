@@ -954,53 +954,32 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
 
         all_images: list = []
-        all_final_latents: list[torch.Tensor] = []
 
         # We'll call the high-level pipeline per sub-batch, passing in the shared
         # `single_latent` repeated for the sub-batch and the pre-built embeddings.
         for start in range(0, batch_size, sub_batch_size):
             end = min(start + sub_batch_size, batch_size)
             current = end - start
+            prompts = [""] * current
 
             sub_prompt_embeds = batch_prompt_embeds[start:end]
-            # negative_embedding may have shape [1, seq, dim] or [1, dim]
-            try:
-                sub_negative_embeds = negative_embedding.repeat(current, 1, 1)
-            except Exception:
-                sub_negative_embeds = negative_embedding.repeat(current, 1)
+            sub_negative_embeds = negative_embedding.repeat(current, 1, 1).squeeze()
 
             sub_latents = single_latent.repeat(current, 1, 1, 1)
 
-            # Try to call the pipeline and request latents if supported.
-            out = None
-            try:
-                out = self.pipe(
-                    prompt_embeds=sub_prompt_embeds,
-                    negative_prompt_embeds=sub_negative_embeds,
-                    latents=sub_latents,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
-                    height=height,
-                    width=width,
-                    output_type="pt",
-                    return_dict=True,
-                    return_latents=True,
-                )
-            except TypeError:
-                # Some diffusers versions/pipelines don't accept return_latents
-                out = self.pipe(
-                    prompt_embeds=sub_prompt_embeds,
-                    negative_prompt_embeds=sub_negative_embeds,
-                    latents=sub_latents,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
-                    height=height,
-                    width=width,
-                    output_type="pt",
-                    return_dict=True,
-                )
+            out = self.pipe(
+                prompts,
+                image_embeds=sub_prompt_embeds,
+                negative_image_embeds=sub_negative_embeds,
+                latents=sub_latents,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                height=height,
+                width=width,
+                output_type="pt",
+                return_dict=True,
+            )
 
             # Extract images (tensor) and latents if provided
             if hasattr(out, "images"):
@@ -1011,16 +990,8 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 # Fallback: assume first positional return is images
                 imgs = out[0]
 
-            latents_out = None
-            if hasattr(out, "latents"):
-                latents_out = out.latents
-            elif isinstance(out, dict) and "latents" in out:
-                latents_out = out["latents"]
-
             # Append results
             all_images.append(imgs)
-            if latents_out is not None:
-                all_final_latents.append(latents_out)
 
         # Concatenate images and latents
         # Images may be a tensor (output_type='pt') with shape [N, C, H, W]
@@ -1028,10 +999,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         pil_images: list[Image.Image] | None = None
         if len(all_images) > 0:
             images_tensor = torch.cat(all_images, dim=0)
-
-        final_latents = (
-            torch.cat(all_final_latents, dim=0) if len(all_final_latents) > 0 else None
-        )
 
         # If the user requested PIL output, convert now
         if output_format == "pil":
