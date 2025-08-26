@@ -718,7 +718,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         encode_start = time.time()
         embedding1, _ = self._extract_text_embeddings(prompt1)
         embedding2, _ = self._extract_text_embeddings(prompt2)
-        print("hellos2Yn", len(embedding1), len(embedding2))
         if embedding1 is None or embedding2 is None:
             raise ValueError("Failed to extract text embeddings from prompts")
 
@@ -826,7 +825,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Extract embeddings for both prompts
         embedding1, _ = self._extract_text_embeddings(prompt1)
         embedding2, _ = self._extract_text_embeddings(prompt2)
-        print("hellos33", embedding1.shape, embedding2.shape)
 
         if embedding1 is None or embedding2 is None:
             raise ValueError("Failed to extract text embeddings from prompts")
@@ -899,25 +897,22 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Set scheduler timesteps
         self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
 
-        # Build negative embeddings for classifier-free guidance
-        negative_embedding, _ = self._extract_text_embeddings("")
-        batch_negative_embeds = negative_embedding.repeat(batch_size, 1)
-
         # Prepare shared initial latent (same noise for all frames) with optional cookie cache
+        # Get UNet configuration (with fallbacks for different architectures)
+        if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
+            num_channels = self.pipe.unet.config.in_channels
+            unet_dtype = self.pipe.unet.dtype
+        else:
+            # Fallback defaults
+            num_channels = 4
+            unet_dtype = torch.float16
+
         if latent_cookie is not None:
             latent_key = (latent_cookie, height, width)
             if latent_key in self.latent_cache:
-                single_latent = self.latent_cache[latent_key].clone()
+                single_latent, negative_embedding = self.latent_cache[latent_key]
+                print("Using cached sl, neg", negative_embedding[0, :3])
             else:
-                # Get UNet configuration (with fallbacks for different architectures)
-                if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
-                    num_channels = self.pipe.unet.config.in_channels
-                    unet_dtype = self.pipe.unet.dtype
-                else:
-                    # Fallback defaults
-                    num_channels = 4
-                    unet_dtype = torch.float16
-
                 single_latent = prepare_latents(
                     self.pipe,
                     batch_size=1,
@@ -928,17 +923,12 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                     device=self.pipe.device,
                     generator=generator,
                 )
-                self.latent_cache[latent_key] = single_latent.clone()
+                negative_embedding, _ = self._extract_text_embeddings("")
+                self.latent_cache[latent_key] = (
+                    single_latent.clone(),
+                    negative_embedding.clone(),
+                )
         else:
-            # Get UNet configuration (with fallbacks for different architectures)
-            if hasattr(self.pipe, "unet") and hasattr(self.pipe.unet, "config"):
-                num_channels = self.pipe.unet.config.in_channels
-                unet_dtype = self.pipe.unet.dtype
-            else:
-                # Fallback defaults
-                num_channels = 4
-                unet_dtype = torch.float16
-
             single_latent = prepare_latents(
                 self.pipe,
                 batch_size=1,
@@ -949,6 +939,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 device=self.pipe.device,
                 generator=generator,
             )
+            negative_embedding, _ = self._extract_text_embeddings("")
 
         # Decide sub-batch size using memory heuristic
         sub_batch_size = self._calculate_sub_batch_size(batch_size, width, height)
@@ -964,7 +955,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
             sub_prompt_embeds = batch_prompt_embeds[start:end]
             sub_negative_embeds = negative_embedding.repeat(current, 1, 1).squeeze()
-
             sub_latents = single_latent.repeat(current, 1, 1, 1)
 
             out = self.pipe(
@@ -1000,16 +990,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         if len(all_images) > 0:
             images_tensor = torch.cat(all_images, dim=0)
 
-        # If the user requested PIL output, convert now
-        if output_format == "pil":
-            pil_images = []
-            arr = images_tensor.cpu().permute(0, 2, 3, 1).float().numpy()
-            if arr.min() < 0:
-                arr = (arr + 1) / 2
-            arr = arr.clamp(0, 1)
-            arr = (arr * 255).round().astype(np.uint8)
-            pil_images.extend([Image.fromarray(a) for a in arr])
-
         # Build return (keep old keys; latents may be None if pipeline didn't return them)
         if output_format == "tensor":
             return {
@@ -1020,6 +1000,15 @@ class Kandinsky21ServerBackend(ImgGenBackend):
                 "dtype": str(images_tensor.dtype),
             }
         else:
+            pil_images = []
+            arr = images_tensor.cpu().permute(0, 2, 3, 1).float()
+            if arr.min() < 0:
+                arr = (arr + 1) / 2
+            arr = arr.clamp(0, 1)
+            arr = arr.numpy()
+            arr = (arr * 255).round().astype(np.uint8)
+            pil_images.extend([Image.fromarray(a) for a in arr])
+
             return {
                 "images": pil_images,
                 "format": "pil",
@@ -1096,8 +1085,6 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         encode_start = time.time()
         embedding1, _ = self._extract_text_embeddings(prompt1)
         embedding2, _ = self._extract_text_embeddings(prompt2)
-
-        print("hellos", embedding1.shape, embedding2.shape)
 
         if embedding1 is None or embedding2 is None:
             raise ValueError("Failed to extract text embeddings from prompts")
