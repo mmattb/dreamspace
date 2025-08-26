@@ -41,7 +41,7 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(..., description="Text prompt for image generation")
     model: Optional[str] = Field(
         "sd15_server",
-        description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'",
+        description="Model to use: 'sd15_server', 'sd21_server', 'kandinsky21_server', 'kandinsky22_server'",
     )
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
     num_inference_steps: Optional[int] = Field(
@@ -57,7 +57,7 @@ class GenerateBatchRequest(BaseModel):
     prompt: str = Field(..., description="Text prompt for image generation")
     model: Optional[str] = Field(
         "sd15_server",
-        description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'",
+        description="Model to use: 'sd15_server', 'sd21_server', 'kandinsky21_server', 'kandinsky22_server'",
     )
     batch_size: int = Field(..., description="Number of variations to generate")
     guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
@@ -87,7 +87,7 @@ class GenerateInterpolatedEmbeddingsRequest(BaseModel):
     prompt2: str = Field(..., description="Ending text prompt for interpolation")
     model: Optional[str] = Field(
         "sd15_server",
-        description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'",
+        description="Model to use: 'sd15_server', 'sd21_server', 'kandinsky21_server', 'kandinsky22_server'",
     )
     batch_size: int = Field(
         ..., description="Number of interpolation steps (including start and end)"
@@ -116,7 +116,7 @@ class AsyncMultiPromptRequest(BaseModel):
     output_dir: str = Field(..., description="Directory where PNG files will be saved")
     model: Optional[str] = Field(
         "sd15_server",
-        description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'",
+        description="Model to use: 'sd15_server', 'sd21_server', 'kandinsky21_server', 'kandinsky22_server'",
     )
     batch_size: int = Field(
         8, description="Number of interpolation steps per prompt segment"
@@ -146,7 +146,7 @@ class AsyncAdaptiveMultiPromptRequest(BaseModel):
     )
     model: Optional[str] = Field(
         "sd15_server",
-        description="Model to use: 'sd15_server', 'sd21_server', or 'kandinsky21_server'",
+        description="Model to use: 'sd15_server', 'sd21_server', 'kandinsky21_server', 'kandinsky22_server'",
     )
     base_batch_size: int = Field(
         100,
@@ -243,7 +243,7 @@ class ModelInfo(BaseModel):
 class SwitchModelRequest(BaseModel):
     model: str = Field(
         ...,
-        description="Model to switch to: 'sd15_server', 'sd21_server', or 'kandinsky21_server'",
+        description="Model to use: 'sd15_server', 'sd21_server', 'kandinsky21_server', 'kandinsky22_server'",
     )
 
 
@@ -259,7 +259,7 @@ app_state = {}
 
 def get_available_models():
     """Get list of available models."""
-    return ["sd15_server", "sd21_server", "kandinsky21_server"]
+    return ["sd15_server", "sd21_server", "kandinsky21_server", "kandinsky22_server"]
 
 
 def get_model_backend(model: str = None):
@@ -597,10 +597,17 @@ def _refine_by_threshold_greedy_split(
         ]
 
     while rounds < max_depth:
+        print(f"Resample round {rounds}")
         if len(preview_imgs) < 2:
             break
 
         dists = pairwise_dist(preview_imgs)
+        print(
+            "asdasdfasdfasdfdsfadsfadsfasdfasdfasdfdasfasdfasdfdas",
+            dists[:2],
+            sum(dists) / len(dists),
+            max(dists),
+        )
         if not dists:
             break
 
@@ -1099,6 +1106,7 @@ def create_app(
                     "sd15_server",
                     "sd21_server",
                     "kandinsky21_server",
+                    "kandinsky22_server",
                 ],
             }
             response_data.update(gpu_info)
@@ -1135,10 +1143,11 @@ def create_app(
                 "sd15_server",
                 "sd21_server",
                 "kandinsky21_server",
+                "kandinsky22_server",
             ]:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid model '{request.model}'. Available models: sd15_server, sd21_server, kandinsky21_server",
+                    detail=f"Invalid model '{request.model}'. Available models: sd15_server, sd21_server, kandinsky21_server, kandinsky22_server",
                 )
 
             # Load the new model (will be cached)
@@ -1684,12 +1693,10 @@ if __name__ == "__main__":
         "--backend",
         default="kandinsky21_server",
         choices=[
-            "kandinsky_local",
+            "kandinsky22_server",
             "kandinsky21_server",
-            "sd_local",
             "sd15_server",
             "sd21_server",
-            "remote",
         ],
         help="Backend type to use",
     )

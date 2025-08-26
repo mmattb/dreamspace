@@ -139,6 +139,12 @@ class ImgGen:
             )
 
             return Kandinsky21ServerBackend(config=self.config, **kwargs)
+        elif backend_type == "kandinsky22_server":
+            from ..backends.server.kandinsky22_server_backend import (
+                Kandinsky22ServerBackend,
+            )
+
+            return Kandinsky22ServerBackend(config=self.config, **kwargs)
         else:
             raise ValueError(f"Unknown backend type: {backend_type}")
 

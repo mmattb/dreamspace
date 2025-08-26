@@ -1,10 +1,13 @@
-"""Kandinsky 2.1 server backend."""
+"""Kandinsky 2.2 server backend."""
 
 import math
 import time
 
-from diffusers import AutoPipelineForText2Image
-from diffusers import KandinskyPipeline, KandinskyPriorPipeline
+from diffusers import (
+    KandinskyV22PriorPipeline,
+    KandinskyV22Pipeline,
+    DPMSolverMultistepScheduler,
+)
 import torch
 from torch import nn
 import numpy as np
@@ -58,7 +61,7 @@ def build_kandinsky_unet_inputs(unet, image_embeds):
     # 2) Now prepare encoder_hidden_states per variant
     if enc_type == "text_image_proj":
         # print("tip")
-        # Kandinsky 2.1: UNet will combine a TEXT slot (enc_hid) with image_embeds (768)
+        # Kandinsky 2.2: UNet will combine a TEXT slot (enc_hid) with image_embeds (768)
         # Give it a dummy text slot with the *encoder_hid_dim* width (often 1024).
         ehs = torch.zeros(B, 1, enc_hid, device=device, dtype=dtype)
 
@@ -115,7 +118,7 @@ def prepare_latents(
     generator: torch.Generator | None = None,
 ):
     """
-    Create initial noise latents for Kandinsky 2.1.
+    Create initial noise latents for Kandinsky 2.2.
     Works with VQModel (MoVQ) decoder; no SD-style 0.18215 scaling.
     """
     # Downscale factor for latents (MoVQ/VQModel). Usually 8.
@@ -149,8 +152,8 @@ def prepare_latents(
     return latents
 
 
-class Kandinsky21ServerBackend(ImgGenBackend):
-    """Kandinsky 2.1 server backend using AutoPipeline.
+class Kandinsky22ServerBackend(ImgGenBackend):
+    """Kandinsky 2.2 server backend using AutoPipeline.
 
     Optimized for server deployment with CPU offloading and memory efficiency.
     Uses the AutoPipeline approach for simplified model loading.
@@ -162,7 +165,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         device: Optional[str] = None,
         disable_safety_checker: bool = False,
     ):
-        """Initialize the Kandinsky 2.1 server backend.
+        """Initialize the Kandinsky 2.2 server backend.
 
         Args:
             config: Configuration instance
@@ -171,8 +174,8 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         """
         self.config = config or Config()
         self.device = device or "cuda"
-        self.model_id = "kandinsky-community/kandinsky-2-1"
-        self.prior_model_id = "kandinsky-community/kandinsky-2-1-prior"
+        self.model_id = "kandinsky-community/kandinsky-2-2-decoder"
+        self.prior_model_id = "kandinsky-community/kandinsky-2-2-prior"
         self.disable_safety_checker = disable_safety_checker
 
         # Latent cache for shared initial latents across batches
@@ -197,16 +200,16 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         megapixels = (width * height) / 1_000_000
 
         # Rough heuristic: Base memory budget in GB (conservative estimate)
-        # Kandinsky 2.1 has even larger memory requirements than SD 2.1 due to two-stage architecture
+        # Kandinsky 2.2 has even larger memory requirements than SD 2.2 due to two-stage architecture
         available_memory_gb = (
             5.0  # Very conservative for Kandinsky's dual-stage pipeline
         )
 
         # Estimate memory usage per image during generation
-        # Kandinsky 2.1 has different latent structure but similar downsampling
+        # Kandinsky 2.2 has different latent structure but similar downsampling
         latent_megapixels = megapixels / 64  # 8x8 downsampling
 
-        # Memory estimates for Kandinsky 2.1 (higher than SD 2.1 due to two-stage design):
+        # Memory estimates for Kandinsky 2.2 (higher than SD 2.2 due to two-stage design):
         # - Latents: latent_megapixels * 4 channels * 2 bytes (float16)
         # - UNet activations: ~6x latent size (larger UNet, more complex architecture)
         # - VAE decode: ~6x latent size (RGB output)
@@ -223,14 +226,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Don't exceed the total batch size
         sub_batch_size = min(max_parallel_images, total_batch_size)
 
-        # Apply very conservative practical limits for Kandinsky 2.1
+        # Apply very conservative practical limits for Kandinsky 2.2
         sub_batch_size = max(
             1, min(sub_batch_size, 4)
         )  # Never more than 4 per sub-batch for Kandinsky
 
         if not quiet:
             print(
-                f"📊 Kandinsky 2.1 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):"
+                f"📊 Kandinsky 2.2 Memory heuristic for {width}x{height} ({megapixels:.1f}MP):"
             )
             print(
                 f"   Estimated {memory_per_image_gb:.2f}GB per image (Kandinsky is very memory-intensive)"
@@ -244,7 +247,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
     def _load_pipelines(self):
         """Load the diffusion pipelines using AutoPipeline."""
 
-        print(f"🔮 Loading Kandinsky 2.1 from {self.model_id} on {self.device}...")
+        print(f"🔮 Loading Kandinsky 2.2 from {self.model_id} on {self.device}...")
 
         # Prepare loading arguments for Kandinsky
         pipeline_kwargs = {
@@ -259,17 +262,15 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # Load text-to-image pipeline. Prefer explicit KandinskyPipeline when available
         # because it exposes the prior/decoder embedding kwargs; fall back to AutoPipeline
         # for compatibility with older installs.
-        try:
-            self.pipe = KandinskyPipeline.from_pretrained(
-                self.model_id, **pipeline_kwargs
-            )
-        except Exception:
-            self.pipe = AutoPipelineForText2Image.from_pretrained(
-                self.model_id, **pipeline_kwargs
-            )
+        self.pipe = KandinskyV22Pipeline.from_pretrained(
+            self.model_id, **pipeline_kwargs
+        )
+        self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            self.pipe.scheduler.config
+        )
 
         # Load prior model + embedder
-        self.prior_pipe = KandinskyPriorPipeline.from_pretrained(
+        self.prior_pipe = KandinskyV22PriorPipeline.from_pretrained(
             self.prior_model_id, **pipeline_kwargs
         )
 
@@ -304,7 +305,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
             self.prior_pipe.enable_attention_slicing(
                 "auto"
             )  # Slice attention computation for memory efficiency
-            print("✅ Attention slicing enabled for Kandinsky 2.1")
+            print("✅ Attention slicing enabled for Kandinsky 2.2")
         except Exception:
             print("⚠️ Attention slicing not available")
 
@@ -317,7 +318,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         freeze_and_eval_pipeline(self.pipe)
         freeze_and_eval_pipeline(self.prior_pipe)
 
-        print(f"✅ Kandinsky 2.1 loaded successfully on {self.device}!")
+        print(f"✅ Kandinsky 2.2 loaded successfully on {self.device}!")
 
     @no_grad_method
     def generate(
@@ -361,8 +362,8 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         guidance_scale = kwargs.get(
             "guidance_scale", 4.0
         )  # Kandinsky typically uses lower guidance
-        height = kwargs.get("height", 768)  # Kandinsky 2.1 default resolution
-        width = kwargs.get("width", 768)  # Kandinsky 2.1 default resolution
+        height = kwargs.get("height", 768)  # Kandinsky 2.2 default resolution
+        width = kwargs.get("width", 768)  # Kandinsky 2.2 default resolution
         num_inference_steps = kwargs.get(
             "num_inference_steps", 100
         )  # Kandinsky typically uses more steps
@@ -807,8 +808,8 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         guidance_scale = kwargs.get(
             "guidance_scale", 4.0
         )  # Kandinsky typically uses lower guidance
-        height = kwargs.get("height", 768)  # Kandinsky 2.1 default resolution
-        width = kwargs.get("width", 768)  # Kandinsky 2.1 default resolution
+        height = kwargs.get("height", 768)  # Kandinsky 2.2 default resolution
+        width = kwargs.get("width", 768)  # Kandinsky 2.2 default resolution
         num_inference_steps = kwargs.get(
             "num_inference_steps", 100
         )  # Kandinsky typically uses more steps
@@ -896,6 +897,7 @@ class Kandinsky21ServerBackend(ImgGenBackend):
 
         # Set scheduler timesteps
         self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
+        print("My pipe scheduler:", type(self.pipe.scheduler))
 
         # Prepare shared initial latent (same noise for all frames) with optional cookie cache
         # Get UNet configuration (with fallbacks for different architectures)
@@ -950,14 +952,14 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         for start in range(0, batch_size, sub_batch_size):
             end = min(start + sub_batch_size, batch_size)
             current = end - start
-            prompts = [""] * current
+            # prompts = [""] * current
 
             sub_prompt_embeds = batch_prompt_embeds[start:end]
             sub_negative_embeds = negative_embedding.repeat(current, 1, 1).squeeze()
             sub_latents = single_latent.repeat(current, 1, 1, 1)
 
             out = self.pipe(
-                prompts,
+                # prompts,
                 image_embeds=sub_prompt_embeds,
                 negative_image_embeds=sub_negative_embeds,
                 latents=sub_latents,
