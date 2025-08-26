@@ -30,19 +30,6 @@ def build_kandinsky_unet_inputs(unet, image_embeds):
     B = image_embeds.shape[0]
     device = image_embeds.device
     dtype = image_embeds.dtype
-
-    # print("addition_embed_type:", getattr(cfg, "addition_embed_type", None))
-    # print("encoder_hid_dim_type:", getattr(cfg, "encoder_hid_dim_type", None))
-    # print("encoder_hid_dim:", getattr(cfg, "encoder_hid_dim", None))
-    # print("cross_attention_dim:", getattr(cfg, "cross_attention_dim", None))
-
-    # print("add.type =", cfg.addition_embed_type)  # text_image
-    # print("proj.type =", cfg.encoder_hid_dim_type)  # text_image_proj
-    # print("enc_hid_dim =", cfg.encoder_hid_dim)  # 1024
-    # print("cross_dim   =", cfg.cross_attention_dim)  # 768
-    # print("need text_embeds width =", unet.add_embedding.text_proj.in_features)  # 768
-    # print("need image_embeds width =", unet.add_embedding.image_proj.in_features)  # 768
-
     cross = getattr(cfg, "cross_attention_dim", 768)
     enc_hid = getattr(cfg, "encoder_hid_dim", cross)
     enc_type = getattr(cfg, "encoder_hid_dim_type", "text_image_proj")
@@ -56,29 +43,23 @@ def build_kandinsky_unet_inputs(unet, image_embeds):
         "text_embeds": text_embeds,
     }
 
-    # print(text_embeds.shape, "yyyyyyyyyyyyyyyyyyyy")
-
     # 2) Now prepare encoder_hidden_states per variant
     if enc_type == "text_image_proj":
-        # print("tip")
         # Kandinsky 2.2: UNet will combine a TEXT slot (enc_hid) with image_embeds (768)
         # Give it a dummy text slot with the *encoder_hid_dim* width (often 1024).
         ehs = torch.zeros(B, 1, enc_hid, device=device, dtype=dtype)
 
     elif enc_type == "text_proj":
-        # print("tp")
         # Less common here, but means it expects raw TEXT width first, then it will project to 'cross'.
         # Make a dummy with width = encoder_hid_dim (or cross if missing).
         ehs = torch.zeros(B, 1, enc_hid, device=device, dtype=dtype)
 
     elif enc_type == "image_proj":
-        # print("ip")
         # Newer path: the UNet will *derive* the text slot internally from image_embeds.
         # You can pass a dummy with width = cross OR even a zero-length; safest is [B,1,cross].
         ehs = torch.zeros(B, 1, cross, device=device, dtype=dtype)
 
     else:
-        # print("shrug")
         # Fallback: match cross
         ehs = torch.zeros(B, 1, cross, device=device, dtype=dtype)
 
@@ -278,24 +259,6 @@ class Kandinsky22ServerBackend(ImgGenBackend):
         self.pipe = self.pipe.to(self.device)
         self.prior_pipe = self.prior_pipe.to(self.device)
         print(f"  📍 Text2Image pipeline moved to {self.device}")
-
-        # Only enable CPU offload for single GPU setups
-        # For multi-GPU, keep models on their assigned GPUs
-        # if self.device == "cuda" or self.device == "cuda:0":
-        #    self.pipe.enable_model_cpu_offload()
-        #    print(f"  💾 CPU offload enabled for {self.device}")
-        # else:
-        #    print(
-        #        f"  🎯 Multi-GPU mode: keeping pipeline on {self.device} (no CPU offload)"
-        #    )
-
-        # Enable memory optimizations - Kandinsky benefits from aggressive memory management
-        # try:
-        #    self.pipe.enable_xformers_memory_efficient_attention()
-        #    self.prior_pipe.enable_xformers_memory_efficient_attention()
-        #    print("✅ XFormers memory optimization enabled")
-        # except Exception:
-        #    print("⚠️ XFormers not available, using default attention")
 
         # Enable additional memory optimizations for Kandinsky's larger model
         try:
@@ -571,7 +534,6 @@ class Kandinsky22ServerBackend(ImgGenBackend):
             vae_scale_factor = getattr(self.pipe, "vae_scale_factor", 0.18215)
             images = self.pipe.vae.decode(latents_batch / vae_scale_factor).sample
             decode_time = time.time() - decode_start
-            print(f"🔮 VAE decode completed in {decode_time:.3f}s")
         else:
             raise ValueError("No image decoder (MOVQ or VAE) found in pipeline")
 
@@ -582,8 +544,6 @@ class Kandinsky22ServerBackend(ImgGenBackend):
             # For tensor format: keep as PyTorch tensor, just normalize to [0,1]
             normalize_start = time.time()
             normalize_time = time.time() - normalize_start
-            print(f"🚀 Keeping tensor format for ultra-fast serialization")
-            print(f"⚡ Tensor normalization completed in {normalize_time:.6f}s")
 
             decode_time = time.time() - decode_start
             print(
@@ -897,7 +857,6 @@ class Kandinsky22ServerBackend(ImgGenBackend):
 
         # Set scheduler timesteps
         self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
-        print("My pipe scheduler:", type(self.pipe.scheduler))
 
         # Prepare shared initial latent (same noise for all frames) with optional cookie cache
         # Get UNet configuration (with fallbacks for different architectures)
@@ -952,14 +911,12 @@ class Kandinsky22ServerBackend(ImgGenBackend):
         for start in range(0, batch_size, sub_batch_size):
             end = min(start + sub_batch_size, batch_size)
             current = end - start
-            # prompts = [""] * current
 
             sub_prompt_embeds = batch_prompt_embeds[start:end]
             sub_negative_embeds = negative_embedding.repeat(current, 1, 1).squeeze()
             sub_latents = single_latent.repeat(current, 1, 1, 1)
 
             out = self.pipe(
-                # prompts,
                 image_embeds=sub_prompt_embeds,
                 negative_image_embeds=sub_negative_embeds,
                 latents=sub_latents,
