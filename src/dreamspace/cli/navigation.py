@@ -28,119 +28,143 @@ Controls:
 Examples:
   python animated_navigation.py --size 512 --batch-size 8
   python animated_navigation.py --width 1024 --height 768 --server http://localhost:8001
-        """
+        """,
     )
-    
+
     # Image size options
     size_group = parser.add_mutually_exclusive_group()
     size_group.add_argument(
-        "--size", type=int, 
-        help="Square image size (e.g., 512, 768, 1024)"
+        "--size", type=int, help="Square image size (e.g., 512, 768, 1024)"
     )
     size_group.add_argument(
-        "--width", type=int, default=768, 
-        help="Image width (default: 768)"
+        "--width", type=int, default=768, help="Image width (default: 768)"
     )
     parser.add_argument(
-        "--height", type=int, default=768, 
-        help="Image height (default: 768)"
+        "--height", type=int, default=768, help="Image height (default: 768)"
     )
-    
+
     # Server configuration
     parser.add_argument(
-        "--server", type=str, default="http://172.28.5.21:8001",
-        help="Server URL (default: http://172.28.5.21:8001)"
+        "--server",
+        type=str,
+        default="http://172.28.5.21:8001",
+        help="Server URL (default: http://172.28.5.21:8001)",
     )
-    
+
     # Model selection
     parser.add_argument(
-        "--model", type=str, default="sd15_server",
-        choices=["sd15_server", "sd21_server", "kandinsky21_server"],
-        help="Model to use for generation (default: sd15_server)"
+        "--model",
+        type=str,
+        default="sd15_server",
+        choices=[
+            "sd15_server",
+            "sd21_server",
+            "kandinsky21_server",
+            "kandinsky22_server",
+        ],
+        help="Model to use for generation (default: sd15_server)",
     )
-    
+
     # Generation parameters
     parser.add_argument(
-        "--batch-size", type=int, default=2,
-        help="Animation batch size (default: 2)"
-    )
-    
-    parser.add_argument(
-        "--prompt", type=str, default="strange bright forest land, steampunk trees",
-        help="Initial prompt for image generation"
-    )
-    
-    # Interpolated embeddings mode
-    parser.add_argument(
-        "--prompt2", type=str, 
-        help="Second prompt for interpolated embeddings mode (enables interpolation between prompt and prompt2)"
-    )
-    
-    parser.add_argument(
-        "--prompt-list", type=str, nargs='+',
-        help="List of prompts for multi-prompt interpolation sequence (enables sequential interpolation through all prompts with looping)"
-    )
-    
-    parser.add_argument(
-        "--interpolation-mode", action="store_true",
-        help="Enable interpolated embeddings mode (requires --prompt2 or --prompt-list)"
-    )
-    
-    # Animation settings
-    parser.add_argument(
-        "--fps", type=int, default=8, choices=[4, 8, 12, 16, 24],
-        help="Animation FPS (default: 8)"
-    )
-    
-    parser.add_argument(
-        "--no-interpolation", action="store_true",
-        help="Disable image interpolation"
-    )
-    
-    # Interactive mode
-    parser.add_argument(
-        "--interactive", action="store_true",
-        help="Use interactive prompts for configuration"
-    )
-    
-    # Generation settings (bifurcated wiggle is now the default method)
-    parser.add_argument(
-        "--noise-magnitude", type=float, default=0.27,
-        help="Magnitude of noise for latent wiggle variations (default: 0.27)"
+        "--batch-size", type=int, default=2, help="Animation batch size (default: 2)"
     )
 
     parser.add_argument(
-        "--bifurcation-step", type=int, default=3,
-        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3)"
+        "--prompt",
+        type=str,
+        default="strange bright forest land, steampunk trees",
+        help="Initial prompt for image generation",
     )
-    
+
+    # Interpolated embeddings mode
     parser.add_argument(
-        "--output-format", type=str, default="png", 
+        "--prompt2",
+        type=str,
+        help="Second prompt for interpolated embeddings mode (enables interpolation between prompt and prompt2)",
+    )
+
+    parser.add_argument(
+        "--prompt-list",
+        type=str,
+        nargs="+",
+        help="List of prompts for multi-prompt interpolation sequence (enables sequential interpolation through all prompts with looping)",
+    )
+
+    parser.add_argument(
+        "--interpolation-mode",
+        action="store_true",
+        help="Enable interpolated embeddings mode (requires --prompt2 or --prompt-list)",
+    )
+
+    # Animation settings
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=8,
+        choices=[4, 8, 12, 16, 24],
+        help="Animation FPS (default: 8)",
+    )
+
+    parser.add_argument(
+        "--no-interpolation", action="store_true", help="Disable image interpolation"
+    )
+
+    # Interactive mode
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Use interactive prompts for configuration",
+    )
+
+    # Generation settings (bifurcated wiggle is now the default method)
+    parser.add_argument(
+        "--noise-magnitude",
+        type=float,
+        default=0.27,
+        help="Magnitude of noise for latent wiggle variations (default: 0.27)",
+    )
+
+    parser.add_argument(
+        "--bifurcation-step",
+        type=int,
+        default=3,
+        help="Number of steps from end to bifurcate in bifurcated wiggle (default: 3)",
+    )
+
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        default="png",
         choices=["jpeg", "tensor", "png", "jpeg_optimized"],
-        help="Output format: 'png' (default, lossless), 'jpeg', 'tensor' (fast local), or 'jpeg_optimized' (skip PIL)"
+        help="Output format: 'png' (default, lossless), 'jpeg', 'tensor' (fast local), or 'jpeg_optimized' (skip PIL)",
     )
-    
+
     parser.add_argument(
-        "--output-dir", type=str,
-        help="Directory to save all generated images (clears directory on each new batch)"
+        "--output-dir",
+        type=str,
+        help="Directory to save all generated images (clears directory on each new batch)",
     )
-    
+
     parser.add_argument(
-        "--latent-cookie", type=int,
-        help="Integer cookie for shared latent across all batches (maintains consistent composition)"
+        "--latent-cookie",
+        type=int,
+        help="Integer cookie for shared latent across all batches (maintains consistent composition)",
     )
-    
+
     parser.add_argument(
-        "--seed", type=int,
-        help="Random seed for consistent generation (if not provided, will be randomly generated)"
+        "--seed",
+        type=int,
+        help="Random seed for consistent generation (if not provided, will be randomly generated)",
     )
-    
+
     # Display options
     parser.add_argument(
-        "--maximize", action="store_true",
-        help="Maximize window to fill screen while maintaining aspect ratio"
+        "--maximize",
+        action="store_true",
+        help="Maximize window to fill screen while maintaining aspect ratio",
     )
-    
+
     return parser.parse_args()
 
 
@@ -155,15 +179,19 @@ def get_image_dimensions(args: argparse.Namespace) -> Tuple[int, int]:
 def get_interactive_config() -> Tuple[str, Tuple[int, int]]:
     """Get configuration through interactive prompts."""
     # Server configuration
-    server_url = input("Enter server URL (or press Enter for http://172.28.5.21:8001): ").strip()
+    server_url = input(
+        "Enter server URL (or press Enter for http://172.28.5.21:8001): "
+    ).strip()
     if not server_url:
         server_url = "http://172.28.5.21:8001"
-    
+
     # Image size configuration
-    size_input = input("Enter image size (512, 768, 1024) or WxH (e.g., 768x512): ").strip()
-    if 'x' in size_input:
+    size_input = input(
+        "Enter image size (512, 768, 1024) or WxH (e.g., 768x512): "
+    ).strip()
+    if "x" in size_input:
         try:
-            width_str, height_str = size_input.split('x')
+            width_str, height_str = size_input.split("x")
             image_width = int(width_str)
             image_height = int(height_str)
         except ValueError:
@@ -172,17 +200,19 @@ def get_interactive_config() -> Tuple[str, Tuple[int, int]]:
         image_width = image_height = int(size_input)
     else:
         image_width = image_height = 768
-    
+
     return server_url, (image_width, image_height)
 
 
-def print_welcome_message(server_url: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2):
+def print_welcome_message(
+    server_url: str, image_size: Tuple[int, int] = (2048, 1280), batch_size: int = 2
+):
     """Print welcome message with configuration details."""
     width, height = image_size
     print(f"🖼️ Using image size: {width}x{height}")
     print(f"🌐 Server: {server_url}")
     print(f"📏 Batch size: {batch_size}")
-    
+
     print("\\n🎮 Controls:")
     print("  ← → ↑ ↓ : Navigate (generates new animation loops)")
     print("  Space: Add random effects")
