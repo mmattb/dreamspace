@@ -260,7 +260,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         # because it exposes the prior/decoder embedding kwargs; fall back to AutoPipeline
         # for compatibility with older installs.
         try:
-            self.pipe = KandinskyPipeline.from_pretrained(self.model_id, **pipeline_kwargs)
+            self.pipe = KandinskyPipeline.from_pretrained(
+                self.model_id, **pipeline_kwargs
+            )
         except Exception:
             self.pipe = AutoPipelineForText2Image.from_pretrained(
                 self.model_id, **pipeline_kwargs
@@ -1035,6 +1037,9 @@ class Kandinsky21ServerBackend(ImgGenBackend):
         if output_format == "pil":
             pil_images = []
             arr = images_tensor.cpu().permute(0, 2, 3, 1).float().numpy()
+            if arr.min() < 0:
+                arr = (arr + 1) / 2
+            arr = arr.clamp(0, 1)
             arr = (arr * 255).round().astype(np.uint8)
             pil_images.extend([Image.fromarray(a) for a in arr])
 
