@@ -323,7 +323,7 @@ class Kandinsky22ServerBackend(ImgGenBackend):
 
         generator = kwargs["generator"]
         guidance_scale = kwargs.get(
-            "guidance_scale", 4.0
+            "guidance_scale", 2.0
         )  # Kandinsky typically uses lower guidance
         height = kwargs.get("height", 768)  # Kandinsky 2.2 default resolution
         width = kwargs.get("width", 768)  # Kandinsky 2.2 default resolution
@@ -665,7 +665,7 @@ class Kandinsky22ServerBackend(ImgGenBackend):
             kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
 
         # Kandinsky-typical defaults if not supplied
-        kwargs.setdefault("guidance_scale", 4.0)
+        kwargs.setdefault("guidance_scale", 2.0)
         kwargs.setdefault("height", 768)
         kwargs.setdefault("width", 768)
         kwargs.setdefault("num_inference_steps", 100)
@@ -766,7 +766,7 @@ class Kandinsky22ServerBackend(ImgGenBackend):
 
         generator = kwargs.get("generator")
         guidance_scale = kwargs.get(
-            "guidance_scale", 4.0
+            "guidance_scale", 2.0
         )  # Kandinsky typically uses lower guidance
         height = kwargs.get("height", 768)  # Kandinsky 2.2 default resolution
         width = kwargs.get("width", 768)  # Kandinsky 2.2 default resolution
@@ -850,7 +850,7 @@ class Kandinsky22ServerBackend(ImgGenBackend):
         """
         # Extract generation params (Kandinsky-typical defaults)
         generator = kwargs.get("generator")
-        guidance_scale = kwargs.get("guidance_scale", 4.0)
+        guidance_scale = kwargs.get("guidance_scale", 2.0)
         height = kwargs.get("height", 768)
         width = kwargs.get("width", 768)
         num_inference_steps = kwargs.get("num_inference_steps", 100)
@@ -925,7 +925,7 @@ class Kandinsky22ServerBackend(ImgGenBackend):
                 generator=generator,
                 height=height,
                 width=width,
-                output_type="pt",
+                output_type="pil",
                 return_dict=True,
             )
 
@@ -938,37 +938,14 @@ class Kandinsky22ServerBackend(ImgGenBackend):
                 # Fallback: assume first positional return is images
                 imgs = out[0]
 
-            # Append results
-            all_images.append(imgs)
-
-        # Concatenate images and latents
-        # Images may be a tensor (output_type='pt') with shape [N, C, H, W]
-        images_tensor = None
-        pil_images: list[Image.Image] | None = None
-        if len(all_images) > 0:
-            images_tensor = torch.cat(all_images, dim=0)
+            all_images.extend(list(imgs))
 
         # Build return (keep old keys; latents may be None if pipeline didn't return them)
         if output_format == "tensor":
-            return {
-                "images": images_tensor,
-                "format": "torch_tensor",
-                "shape": tuple(images_tensor.shape),
-                "device": str(images_tensor.device),
-                "dtype": str(images_tensor.dtype),
-            }
+            raise NotImplementedError()
         else:
-            pil_images = []
-            arr = images_tensor.cpu().permute(0, 2, 3, 1).float()
-            if arr.min() < 0:
-                arr = (arr + 1) / 2
-            arr = arr.clamp(0, 1)
-            arr = arr.numpy()
-            arr = (arr * 255).round().astype(np.uint8)
-            pil_images.extend([Image.fromarray(a) for a in arr])
-
             return {
-                "images": pil_images,
+                "images": all_images,
                 "format": "pil",
             }
 
@@ -1030,7 +1007,7 @@ class Kandinsky22ServerBackend(ImgGenBackend):
             kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
 
         generator = kwargs.get("generator")
-        guidance_scale = kwargs.get("guidance_scale", 4.0)  # Kandinsky default
+        guidance_scale = kwargs.get("guidance_scale", 2.0)  # Kandinsky default
         height = kwargs.get("height", 768)  # Kandinsky default
         width = kwargs.get("width", 768)  # Kandinsky default
         num_inference_steps = kwargs.get(
@@ -1144,7 +1121,7 @@ class Kandinsky22ServerBackend(ImgGenBackend):
     def _extract_text_embeddings(self, prompt: str) -> torch.Tensor:
         """Extract text embeddings from prompt using Kandinsky's text encoder."""
         # Kandinsky may have different tokenizer structure
-        emb = self.prior_pipe(prompt, num_inference_steps=25, guidance_scale=4.0)
+        emb = self.prior_pipe(prompt, num_inference_steps=50, guidance_scale=1.2)
         return emb.image_embeds, emb.negative_image_embeds
 
     def cleanup(self):
