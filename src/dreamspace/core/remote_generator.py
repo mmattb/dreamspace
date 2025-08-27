@@ -25,6 +25,34 @@ from .animation import (
 )
 
 
+def get_defaults_by_model(model):
+    defaults = {
+        "width": 768,
+        "height": 768,
+        "num_inference_steps": 36,
+        "guidance_scale": 2.5,
+        "noise_magnitude": 0.3,
+        "bifurcation_step": 3,
+        "output_format": "pil",
+    }
+
+    # Model overrides
+    if model == "kandinsky21_server":
+        defaults["num_inference_steps"] = 32
+    elif model == "kandinsky22_server":
+        defaults["guidance_scale"] = 2.4
+    elif model == "sd15_server":
+        defaults["num_inference_steps"] = 22
+        defaults["width"] = 512
+        defaults["height"] = 512
+        defaults["guidance_scale"] = 7.5
+    elif model == "sd21_server":
+        defaults["num_inference_steps"] = 30
+        defaults["guidance_scale"] = 7.0
+
+    return defaults
+
+
 class AnimatedRemoteImgGen:
     """Remote image generator with batch animation support and artistic modulation."""
 
@@ -163,18 +191,25 @@ class AnimatedRemoteImgGen:
         self.current_request_id = request_id
         self.cancel_current_request = False
 
+        defaults = get_defaults_by_model(self.model)
         request_data = {
             "prompt": use_prompt,
             "batch_size": batch_size,
             "model": self.model,
-            "width": kwargs.get("width", 512),
-            "height": kwargs.get("height", 512),
-            "num_inference_steps": kwargs.get("num_inference_steps", 20),
-            "guidance_scale": kwargs.get("guidance_scale", 7.5),
+            "width": kwargs.get("width", defaults["width"]),
+            "height": kwargs.get("height", defaults["height"]),
+            "num_inference_steps": kwargs.get(
+                "num_inference_steps", defaults["num_inference_steps"]
+            ),
+            "guidance_scale": kwargs.get("guidance_scale", defaults["guidance_scale"]),
             "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
-            "noise_magnitude": kwargs.get("noise_magnitude", 0.3),
-            "bifurcation_step": kwargs.get("bifurcation_step", 3),
-            "output_format": kwargs.get("output_format", "jpeg"),
+            "noise_magnitude": kwargs.get(
+                "noise_magnitude", defaults["noise_magnitude"]
+            ),
+            "bifurcation_step": kwargs.get(
+                "bifurcation_step", defaults["bifurcation_step"]
+            ),
+            "output_format": kwargs.get("output_format", defaults["output_format"]),
             "latent_cookie": kwargs.get("latent_cookie", None),
         }
 
@@ -338,17 +373,20 @@ class AnimatedRemoteImgGen:
         self.current_request_id = request_id
         self.cancel_current_request = False
 
+        defaults = get_defaults_by_model(self.model)
         request_data = {
             "prompt1": prompt1,
             "prompt2": prompt2,
             "batch_size": batch_size,
             "model": self.model,
-            "width": kwargs.get("width", 512),
-            "height": kwargs.get("height", 512),
-            "num_inference_steps": kwargs.get("num_inference_steps", 20),
-            "guidance_scale": kwargs.get("guidance_scale", 7.5),
+            "width": kwargs.get("width", defaults["width"]),
+            "height": kwargs.get("height", defaults["height"]),
+            "num_inference_steps": kwargs.get(
+                "num_inference_steps", defaults["num_inference_steps"]
+            ),
+            "guidance_scale": kwargs.get("guidance_scale", defaults["guidance_scale"]),
             "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
-            "output_format": kwargs.get("output_format", "jpeg"),
+            "output_format": kwargs.get("output_format", defaults["output_format"]),
             "latent_cookie": kwargs.get("latent_cookie", None),
         }
 
@@ -625,17 +663,20 @@ class AnimatedRemoteImgGen:
         self.current_request_id = request_id
         self.cancel_current_request = False
 
+        defaults = get_defaults_by_model(self.model)
         request_data = {
             "prompts": prompts,
             "output_dir": output_dir,
             "batch_size": batch_size,
             "model": self.model,
-            "width": kwargs.get("width", 512),
-            "height": kwargs.get("height", 512),
-            "num_inference_steps": kwargs.get("num_inference_steps", 20),
-            "guidance_scale": kwargs.get("guidance_scale", 7.5),
+            "width": kwargs.get("width", defaults["width"]),
+            "height": kwargs.get("height", defaults["height"]),
+            "num_inference_steps": kwargs.get(
+                "num_inference_steps", defaults["num_inference_steps"]
+            ),
+            "guidance_scale": kwargs.get("guidance_scale", defaults["guidance_scale"]),
             "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
-            "output_format": kwargs.get("output_format", "png"),
+            "output_format": kwargs.get("output_format", defaults["output_format"]),
             "latent_cookie": kwargs.get("latent_cookie", None),
         }
 
@@ -707,15 +748,18 @@ class AnimatedRemoteImgGen:
         self.current_request_id = request_id
         self.cancel_current_request = False
 
+        defaults = get_defaults_by_model(self.model)
         request_data = {
             "prompts": prompts,
             "output_dir": output_dir,
             "model": self.model,
             "base_batch_size": base_batch_size,
-            "width": kwargs.get("width", 512),
-            "height": kwargs.get("height", 512),
-            "num_inference_steps": kwargs.get("num_inference_steps", 20),
-            "guidance_scale": kwargs.get("guidance_scale", 7.5),
+            "width": kwargs.get("width", defaults["width"]),
+            "height": kwargs.get("height", defaults["height"]),
+            "num_inference_steps": kwargs.get(
+                "num_inference_steps", defaults["num_inference_steps"]
+            ),
+            "guidance_scale": kwargs.get("guidance_scale", defaults["guidance_scale"]),
             "seed": kwargs.get("seed", random.randint(0, 2**32 - 1)),
             "latent_cookie": kwargs.get("latent_cookie", None),
             "metric": metric,
