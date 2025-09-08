@@ -3,8 +3,11 @@
 import math
 import time
 from typing import Dict, Any, Optional, List
+import base64
+from io import BytesIO
 
-from diffusers import AutoPipelineForText2Image
+from diffusers import AutoPipelineForText2Image, StableDiffusionInpaintPipeline
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
 import numpy as np
 import torch
 from PIL import Image
@@ -41,6 +44,10 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
 
         # Latent cache for shared initial latents across batches
         self.latent_cache = {}  # cookie -> latent tensor
+
+        # Pipeline cache for different tasks
+        self.inpaint_pipe = None
+        self.controlnet_pipes = {}  # controlnet_type -> pipeline
 
         self._load_pipelines()
 
@@ -1382,6 +1389,241 @@ class StableDiffusion21ServerBackend(ImgGenBackend):
         """Clean up GPU memory."""
         if hasattr(self, "pipe"):
             del self.pipe
+        
+        if hasattr(self, "inpaint_pipe") and self.inpaint_pipe:
+            del self.inpaint_pipe
+            
+        if hasattr(self, "controlnet_pipes"):
+            for pipe in self.controlnet_pipes.values():
+                if pipe:
+                    del pipe
+            self.controlnet_pipes.clear()
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    # New methods for interactive editing
+
+    @no_grad_method
+    def inpaint_region(
+        self,
+        source_image: Image.Image,
+        mask_image: Image.Image,
+        prompt: str,
+        negative_prompt: str = "",
+        guidance_scale: float = 7.5,
+        num_inference_steps: int = 50,
+        strength: float = 1.0,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Inpaint a masked region of the image.
+        
+        Args:
+            source_image: Source image to edit
+            mask_image: Binary mask (white = inpaint, black = keep)
+            prompt: Text prompt for the inpainted region
+            negative_prompt: Negative prompt
+            guidance_scale: Guidance scale for generation
+            num_inference_steps: Number of denoising steps
+            strength: How much to respect the original image (0=ignore, 1=full inpaint)
+            
+        Returns:
+            Dict with 'images', 'format', and metadata
+        """
+        start_time = time.time()
+        
+        # Load inpaint pipeline if not already loaded
+        if self.inpaint_pipe is None:
+            print("🖌️ Loading inpainting pipeline...")
+            self.inpaint_pipe = StableDiffusionInpaintPipeline.from_pretrained(
+                self.model_id,
+                torch_dtype=torch.float16,
+                safety_checker=None if self.disable_safety_checker else "default",
+                requires_safety_checker=False if self.disable_safety_checker else True,
+            ).to(self.device)
+            
+            # Enable memory optimizations
+            self.inpaint_pipe.enable_model_cpu_offload()
+            if hasattr(self.inpaint_pipe, 'enable_xformers_memory_efficient_attention'):
+                try:
+                    self.inpaint_pipe.enable_xformers_memory_efficient_attention()
+                except Exception:
+                    pass
+        
+        # Ensure images are RGB and correct size
+        if source_image.mode != "RGB":
+            source_image = source_image.convert("RGB")
+        if mask_image.mode != "RGB":
+            mask_image = mask_image.convert("RGB")
+            
+        # Generate
+        generator = kwargs.get("generator")
+        result = self.inpaint_pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=source_image,
+            mask_image=mask_image,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            strength=strength,
+            generator=generator,
+        )
+        
+        generation_time = time.time() - start_time
+        
+        return {
+            "images": result.images,
+            "format": "pil",
+            "generation_time": generation_time,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "step_type": "inpaint"
+        }
+
+    @no_grad_method
+    def prompt_to_prompt_edit(
+        self,
+        source_image: Image.Image,
+        source_prompt: str,
+        target_prompt: str,
+        cross_attention_strength: float = 0.8,
+        guidance_scale: float = 7.5,
+        num_inference_steps: int = 50,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Edit image using cross-attention manipulation (prompt-to-prompt).
+        
+        This is a simplified implementation. For full prompt-to-prompt editing,
+        you would need to implement cross-attention control during the denoising process.
+        
+        Args:
+            source_image: Source image to edit
+            source_prompt: Original prompt used to generate the source image
+            target_prompt: New prompt for editing
+            cross_attention_strength: Strength of cross-attention control
+            guidance_scale: Guidance scale for generation
+            num_inference_steps: Number of denoising steps
+            
+        Returns:
+            Dict with 'images', 'format', and metadata
+        """
+        start_time = time.time()
+        
+        # For now, implement as img2img with high strength
+        # TODO: Implement proper cross-attention manipulation
+        print("⚠️ Using img2img approximation for prompt-to-prompt editing")
+        
+        # Convert to img2img
+        strength = 1.0 - cross_attention_strength  # Invert logic
+        
+        generator = kwargs.get("generator")
+        result = self.pipe(
+            prompt=target_prompt,
+            image=source_image,
+            strength=strength,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            generator=generator,
+        )
+        
+        generation_time = time.time() - start_time
+        
+        return {
+            "images": result.images,
+            "format": "pil",
+            "generation_time": generation_time,
+            "prompt": target_prompt,
+            "source_prompt": source_prompt,
+            "step_type": "prompt_edit"
+        }
+
+    @no_grad_method  
+    def controlnet_region_edit(
+        self,
+        source_image: Image.Image,
+        control_image: Image.Image,
+        prompt: str,
+        controlnet_type: str = "canny",
+        controlnet_strength: float = 1.0,
+        guidance_scale: float = 7.5,
+        num_inference_steps: int = 50,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Edit image using ControlNet for region assignment.
+        
+        Args:
+            source_image: Source image to edit
+            control_image: Control image (e.g., Canny edges, depth map)
+            prompt: Text prompt for generation
+            controlnet_type: Type of ControlNet (canny, depth, pose, etc.)
+            controlnet_strength: Strength of ControlNet conditioning
+            guidance_scale: Guidance scale for generation
+            num_inference_steps: Number of denoising steps
+            
+        Returns:
+            Dict with 'images', 'format', and metadata
+        """
+        start_time = time.time()
+        
+        # Load ControlNet pipeline if not already loaded
+        if controlnet_type not in self.controlnet_pipes:
+            print(f"🎮 Loading ControlNet pipeline for {controlnet_type}...")
+            
+            # Map controlnet types to model IDs
+            controlnet_models = {
+                "canny": "lllyasviel/sd-controlnet-canny",
+                "depth": "lllyasviel/sd-controlnet-depth", 
+                "pose": "lllyasviel/sd-controlnet-openpose",
+                "scribble": "lllyasviel/sd-controlnet-scribble",
+                "seg": "lllyasviel/sd-controlnet-seg",
+            }
+            
+            if controlnet_type not in controlnet_models:
+                raise ValueError(f"Unsupported ControlNet type: {controlnet_type}")
+            
+            controlnet = ControlNetModel.from_pretrained(
+                controlnet_models[controlnet_type],
+                torch_dtype=torch.float16
+            )
+            
+            self.controlnet_pipes[controlnet_type] = StableDiffusionControlNetPipeline.from_pretrained(
+                self.model_id,
+                controlnet=controlnet,
+                torch_dtype=torch.float16,
+                safety_checker=None if self.disable_safety_checker else "default",
+                requires_safety_checker=False if self.disable_safety_checker else True,
+            ).to(self.device)
+            
+            # Enable memory optimizations
+            self.controlnet_pipes[controlnet_type].enable_model_cpu_offload()
+            if hasattr(self.controlnet_pipes[controlnet_type], 'enable_xformers_memory_efficient_attention'):
+                try:
+                    self.controlnet_pipes[controlnet_type].enable_xformers_memory_efficient_attention()
+                except Exception:
+                    pass
+        
+        # Ensure control image is correct format
+        if control_image.mode != "RGB":
+            control_image = control_image.convert("RGB")
+        
+        # Generate
+        generator = kwargs.get("generator")
+        result = self.controlnet_pipes[controlnet_type](
+            prompt=prompt,
+            image=control_image,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            controlnet_conditioning_scale=controlnet_strength,
+            generator=generator,
+        )
+        
+        generation_time = time.time() - start_time
+        
+        return {
+            "images": result.images,
+            "format": "pil",
+            "generation_time": generation_time,
+            "prompt": prompt,
+            "controlnet_type": controlnet_type,
+            "step_type": "controlnet"
+        }

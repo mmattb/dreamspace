@@ -253,13 +253,157 @@ class SwitchModelResponse(BaseModel):
     current_model: str
 
 
+# New models for interactive editing
+class CreateSessionRequest(BaseModel):
+    model: Optional[str] = Field("sd21_server", description="Model to use for session")
+
+
+class CreateSessionResponse(BaseModel):
+    session_id: str
+    model: str
+
+
+class PromptToPromptRequest(BaseModel):
+    session_id: str
+    target_prompt: str
+    source_prompt: Optional[str] = Field(None, description="If not provided, uses last prompt from session")
+    cross_attention_strength: Optional[float] = Field(0.8, description="Strength of cross-attention control")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+
+
+class InpaintRequest(BaseModel):
+    session_id: str
+    prompt: str
+    mask_data: str = Field(..., description="Base64 encoded mask image")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+    mask_blur: Optional[int] = Field(4, description="Blur radius for mask edges")
+
+
+class ControlNetRequest(BaseModel):
+    session_id: str
+    prompt: str
+    control_data: str = Field(..., description="Base64 encoded control image")
+    controlnet_type: str = Field("canny", description="Type of ControlNet: canny, depth, pose, etc.")
+    controlnet_strength: Optional[float] = Field(1.0, description="ControlNet conditioning scale")
+    guidance_scale: Optional[float] = Field(7.5, description="Guidance scale")
+    num_inference_steps: Optional[int] = Field(50, description="Number of inference steps")
+
+
+class SessionImageResponse(BaseModel):
+    session_id: str
+    image_data: str = Field(..., description="Base64 encoded result image")
+    step_type: str
+    prompt: str
+    generation_time: float
+
+
+class SessionInfoResponse(BaseModel):
+    session_id: str
+    created_at: float
+    last_accessed: float
+    history_count: int
+    current_prompt: Optional[str]
+
+
 # Global state
 app_state = {}
+# Session storage
+session_storage = {}  # session_id -> GenerationSession
 
 
 def get_available_models():
     """Get list of available models."""
     return ["sd15_server", "sd21_server", "kandinsky21_server", "kandinsky22_server"]
+
+
+# Session management classes
+class GenerationState:
+    def __init__(self, image: Image.Image, latents: Optional[torch.Tensor], 
+                 prompt_embeds: Optional[torch.Tensor], prompt: str, step_type: str):
+        self.image = image
+        self.latents = latents
+        self.prompt_embeds = prompt_embeds
+        self.prompt = prompt
+        self.step_type = step_type  # "generate", "inpaint", "prompt_edit", "controlnet"
+        self.timestamp = time.time()
+
+
+class GenerationSession:
+    def __init__(self, session_id: str, model: str):
+        self.session_id = session_id
+        self.model = model
+        self.created_at = time.time()
+        self.last_accessed = time.time()
+        self.generation_history: List[GenerationState] = []
+        self.current_image: Optional[Image.Image] = None
+        self.current_latents: Optional[torch.Tensor] = None
+        self.current_prompt_embeds: Optional[torch.Tensor] = None
+        self.current_prompt: Optional[str] = None
+
+    def add_generation(self, state: GenerationState):
+        """Add a new generation state to history."""
+        self.generation_history.append(state)
+        self.current_image = state.image
+        self.current_latents = state.latents
+        self.current_prompt_embeds = state.prompt_embeds
+        self.current_prompt = state.prompt
+        self.last_accessed = time.time()
+
+    def get_current_state(self) -> Optional[GenerationState]:
+        """Get the most recent generation state."""
+        if self.generation_history:
+            return self.generation_history[-1]
+        return None
+
+
+def create_session(model: str = "sd21_server") -> GenerationSession:
+    """Create a new generation session."""
+    session_id = str(uuid.uuid4())
+    session = GenerationSession(session_id, model)
+    session_storage[session_id] = session
+    return session
+
+
+def get_session(session_id: str) -> GenerationSession:
+    """Get an existing session."""
+    if session_id not in session_storage:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    
+    session = session_storage[session_id]
+    session.last_accessed = time.time()
+    return session
+
+
+def cleanup_old_sessions(max_age_hours: int = 24):
+    """Clean up sessions older than max_age_hours."""
+    current_time = time.time()
+    max_age_seconds = max_age_hours * 3600
+    
+    to_remove = []
+    for session_id, session in session_storage.items():
+        if current_time - session.last_accessed > max_age_seconds:
+            to_remove.append(session_id)
+    
+    for session_id in to_remove:
+        del session_storage[session_id]
+    
+    if to_remove:
+        print(f"🧹 Cleaned up {len(to_remove)} old sessions")
+
+
+def image_to_base64(image: Image.Image) -> str:
+    """Convert PIL Image to base64 string."""
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def base64_to_image(base64_str: str) -> Image.Image:
+    """Convert base64 string to PIL Image."""
+    image_data = base64.b64decode(base64_str)
+    return Image.open(BytesIO(image_data))
 
 
 def get_model_backend(model: str = None):
@@ -1644,6 +1788,301 @@ def create_app(
                 estimated_duration=estimated_duration,
                 output_dir=request.output_dir,
             )
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Session Management Endpoints
+
+    @app.post("/create_session", response_model=SessionImageResponse)
+    async def create_session(
+        request: CreateSessionRequest,
+        authenticated: bool = Depends(auth_dependency),
+    ):
+        """Create a new generation session with an initial image."""
+        try:
+            # Generate initial image
+            backend = get_model_backend(request.backend_type)
+            result = backend.generate(
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt,
+                width=request.width,
+                height=request.height,
+                guidance_scale=request.guidance_scale,
+                num_inference_steps=request.num_inference_steps,
+                num_images_per_prompt=1
+            )
+            
+            # Create session
+            session = GenerationSession(
+                initial_prompt=request.prompt,
+                backend_type=request.backend_type
+            )
+            
+            # Add initial state
+            initial_image = result["images"][0]
+            initial_state = GenerationState(
+                image=initial_image,
+                prompt=request.prompt,
+                step_type="initial",
+                metadata=result
+            )
+            session.add_state(initial_state)
+            
+            # Store session
+            app_state.session_storage[session.session_id] = session
+            
+            # Return response
+            return SessionImageResponse(
+                session_id=session.session_id,
+                image_base64=image_to_base64(initial_image),
+                prompt=request.prompt,
+                step_count=1,
+                metadata=result
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/prompt_to_prompt", response_model=SessionImageResponse)
+    async def prompt_to_prompt_edit(
+        request: PromptToPromptRequest,
+        authenticated: bool = Depends(auth_dependency),
+    ):
+        """Edit an image using prompt-to-prompt technique."""
+        try:
+            # Get session
+            session = app_state.session_storage.get(request.session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            # Get backend
+            backend = get_model_backend(session.backend_type)
+            if not hasattr(backend, 'prompt_to_prompt_edit'):
+                raise HTTPException(status_code=400, detail="Backend does not support prompt-to-prompt editing")
+            
+            # Get source image
+            if request.source_step == -1:
+                source_state = session.get_current_state()
+            else:
+                if request.source_step >= len(session.states):
+                    raise HTTPException(status_code=400, detail="Invalid source step")
+                source_state = session.states[request.source_step]
+            
+            # Perform edit
+            result = backend.prompt_to_prompt_edit(
+                source_image=source_state.image,
+                source_prompt=source_state.prompt,
+                target_prompt=request.target_prompt,
+                cross_attention_strength=request.cross_attention_strength,
+                guidance_scale=request.guidance_scale,
+                num_inference_steps=request.num_inference_steps
+            )
+            
+            # Add new state
+            new_image = result["images"][0]
+            new_state = GenerationState(
+                image=new_image,
+                prompt=request.target_prompt,
+                step_type="prompt_edit",
+                metadata=result
+            )
+            session.add_state(new_state)
+            
+            return SessionImageResponse(
+                session_id=request.session_id,
+                image_base64=image_to_base64(new_image),
+                prompt=request.target_prompt,
+                step_count=len(session.states),
+                metadata=result
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/inpaint", response_model=SessionImageResponse)
+    async def inpaint_region(
+        request: InpaintRequest,
+        authenticated: bool = Depends(auth_dependency),
+    ):
+        """Inpaint a masked region of an image."""
+        try:
+            # Get session
+            session = app_state.session_storage.get(request.session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            # Get backend
+            backend = get_model_backend(session.backend_type)
+            if not hasattr(backend, 'inpaint_region'):
+                raise HTTPException(status_code=400, detail="Backend does not support inpainting")
+            
+            # Get source image
+            if request.source_step == -1:
+                source_state = session.get_current_state()
+            else:
+                if request.source_step >= len(session.states):
+                    raise HTTPException(status_code=400, detail="Invalid source step")
+                source_state = session.states[request.source_step]
+            
+            # Decode mask image
+            mask_image = base64_to_image(request.mask_base64)
+            
+            # Perform inpainting
+            result = backend.inpaint_region(
+                source_image=source_state.image,
+                mask_image=mask_image,
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt,
+                guidance_scale=request.guidance_scale,
+                num_inference_steps=request.num_inference_steps,
+                strength=request.strength
+            )
+            
+            # Add new state
+            new_image = result["images"][0]
+            new_state = GenerationState(
+                image=new_image,
+                prompt=request.prompt,
+                step_type="inpaint",
+                metadata=result
+            )
+            session.add_state(new_state)
+            
+            return SessionImageResponse(
+                session_id=request.session_id,
+                image_base64=image_to_base64(new_image),
+                prompt=request.prompt,
+                step_count=len(session.states),
+                metadata=result
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/controlnet", response_model=SessionImageResponse)
+    async def controlnet_region_edit(
+        request: ControlNetRequest,
+        authenticated: bool = Depends(auth_dependency),
+    ):
+        """Edit an image using ControlNet for region assignment."""
+        try:
+            # Get session
+            session = app_state.session_storage.get(request.session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            # Get backend
+            backend = get_model_backend(session.backend_type)
+            if not hasattr(backend, 'controlnet_region_edit'):
+                raise HTTPException(status_code=400, detail="Backend does not support ControlNet")
+            
+            # Get source image (for reference, though ControlNet uses control image)
+            if request.source_step == -1:
+                source_state = session.get_current_state()
+            else:
+                if request.source_step >= len(session.states):
+                    raise HTTPException(status_code=400, detail="Invalid source step")
+                source_state = session.states[request.source_step]
+            
+            # Decode control image
+            control_image = base64_to_image(request.control_image_base64)
+            
+            # Perform ControlNet generation
+            result = backend.controlnet_region_edit(
+                source_image=source_state.image,
+                control_image=control_image,
+                prompt=request.prompt,
+                controlnet_type=request.controlnet_type,
+                controlnet_strength=request.controlnet_strength,
+                guidance_scale=request.guidance_scale,
+                num_inference_steps=request.num_inference_steps
+            )
+            
+            # Add new state
+            new_image = result["images"][0]
+            new_state = GenerationState(
+                image=new_image,
+                prompt=request.prompt,
+                step_type="controlnet",
+                metadata=result
+            )
+            session.add_state(new_state)
+            
+            return SessionImageResponse(
+                session_id=request.session_id,
+                image_base64=image_to_base64(new_image),
+                prompt=request.prompt,
+                step_count=len(session.states),
+                metadata=result
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/session/{session_id}", response_model=Dict[str, Any])
+    async def get_session(
+        session_id: str,
+        authenticated: bool = Depends(auth_dependency),
+    ):
+        """Get session information and history."""
+        try:
+            session = app_state.session_storage.get(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            # Convert session to dict with base64 images
+            session_data = {
+                "session_id": session.session_id,
+                "initial_prompt": session.initial_prompt,
+                "backend_type": session.backend_type,
+                "created_at": session.created_at.isoformat(),
+                "states": []
+            }
+            
+            for i, state in enumerate(session.states):
+                state_data = {
+                    "step": i,
+                    "prompt": state.prompt,
+                    "step_type": state.step_type,
+                    "created_at": state.created_at.isoformat(),
+                    "image_base64": image_to_base64(state.image),
+                    "metadata": state.metadata
+                }
+                session_data["states"].append(state_data)
+            
+            return session_data
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/session/{session_id}")
+    async def delete_session(
+        session_id: str,
+        authenticated: bool = Depends(auth_dependency),
+    ):
+        """Delete a session and free its memory."""
+        try:
+            session = app_state.session_storage.get(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            
+            # Remove from storage
+            del app_state.session_storage[session_id]
+            
+            return {"message": "Session deleted", "session_id": session_id}
         except HTTPException:
             raise
         except Exception as e:
